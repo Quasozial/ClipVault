@@ -1,0 +1,22 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "vite",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "--prefix",
+        "clipvault",
+        "run",
+        "dev"
+      ],
+      "port": 1420
+    },
+    {
+      "name": "vite-alt",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--prefix", "clipvault", "run", "dev", "--", "--port", "1431", "--strictPort"],
+      "port": 1431
+    }
+  ]
+}
