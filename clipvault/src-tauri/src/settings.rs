@@ -4,6 +4,9 @@ use std::path::{Path, PathBuf};
 
 /// Subfolder of `buffer_dir` that holds the segments (see [`Settings::segment_dir`]).
 pub const BUFFER_SUBDIR: &str = "ClipVault-buffer";
+/// Subfolder of `buffer_dir` for per-save temp dirs (same volume as the
+/// segments, so a save hard-links them instead of copying).
+pub const SAVE_TEMP_SUBDIR: &str = "ClipVault-save";
 
 /// Video encoder for recording. `Auto` picks the best one this PC can run (see
 /// `capture::encoders`); the others are fixed choices, replaced by `Auto`'s pick

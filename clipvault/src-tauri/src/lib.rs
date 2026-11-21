@@ -13,6 +13,7 @@ pub mod library;
 pub mod locks;
 pub mod logging;
 pub mod notify;
+pub mod rescan;
 pub mod rl_stats;
 pub mod save;
 pub mod settings;

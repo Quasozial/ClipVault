@@ -131,7 +131,7 @@ mod e2e {
         let cfg = CoreConfig {
             data_dir: data,
             ffmpeg: Some(ff.to_path_buf()),
-            temp_root: base.join("tmp"),
+            temp_root: Some(base.join("tmp")),
             video_source: video,
             desktop_kick: true,
         };

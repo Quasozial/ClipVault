@@ -48,8 +48,9 @@ pub struct CoreConfig {
     pub data_dir: PathBuf,
     /// `None` ⇒ health `Failing("FFmpeg not found")`, saves fail.
     pub ffmpeg: Option<PathBuf>,
-    /// Parent of per-save temp dirs (normally `%TEMP%`).
-    pub temp_root: PathBuf,
+    /// Parent of per-save temp dirs. `None` (the app): `<buffer_dir>\ClipVault-save`,
+    /// on the segments' volume so they are hard-linked rather than copied.
+    pub temp_root: Option<PathBuf>,
     pub video_source: VideoSource,
     /// Install the desktop kick (ddagrab on a static desktop, ruling R8).
     pub desktop_kick: bool,
@@ -61,7 +62,7 @@ impl CoreConfig {
         CoreConfig {
             data_dir: app_data_dir(),
             ffmpeg,
-            temp_root: std::env::temp_dir(),
+            temp_root: None,
             video_source: VideoSource::Ddagrab,
             desktop_kick: true,
         }
@@ -125,6 +126,10 @@ pub struct AppCore {
     encoders: OnceLock<Vec<Encoder>>,
     /// Background AV1 re-encoding of saved clips.
     compressor: Arc<crate::compress::Compressor>,
+    /// Set when the library was restored or recreated at open: the capture
+    /// folder is rescanned on start for clips the library lost (see `rescan`).
+    /// Inner value: time of the restored backup (`None`: no usable backup).
+    rescan_after_restore: Mutex<Option<Option<SystemTime>>>,
     _kicker: Option<Arc<DesktopKicker>>,
 }
 
@@ -141,10 +146,23 @@ impl AppCore {
         let backups = cfg.data_dir.join("backups");
         let (conn, notice) =
             db::open_library(&db_path, &backups).with_context(|| format!("opening library {}", db_path.display()))?;
+        // Before today's backup is written: the restored backup's own time.
+        let rescan_after_restore = notice.as_ref().map(|_| {
+            let empty = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get::<_, i64>(0)).unwrap_or(0) == 0;
+            if empty { None } else { db::newest_backup_time(&backups) }
+        });
         if let Some(n) = notice {
             ui.toast(APP_TITLE, &n);
         }
         db::backup_daily(&conn, &backups);
+        // No save runs yet: leftovers of saves cut short by a crash or power
+        // loss (also in %TEMP%, where older versions put them).
+        for root in [save_temp_root(&cfg, &settings), std::env::temp_dir()] {
+            let n = crate::save::clean_stale_save_dirs(&root);
+            if n > 0 {
+                tracing::info!("removed {n} stale save temp folder(s) in {}", root.display());
+            }
+        }
         let db = Arc::new(Mutex::new(conn));
         let max = Duration::from_secs(settings.max_save_length_s as u64);
         let bus = Arc::new(EventBus::new(max));
@@ -194,6 +212,7 @@ impl AppCore {
             rt: OnceLock::new(),
             encoders: OnceLock::new(),
             compressor,
+            rescan_after_restore: Mutex::new(rescan_after_restore),
             _kicker: kicker,
         }))
     }
@@ -214,6 +233,31 @@ impl AppCore {
         rt.spawn(control::control_loop(self.clone(), procs, cmd_rx));
         rt.spawn(control::health_loop(self.clone(), self.sup_events.subscribe()));
         rt.spawn(control::levels_loop(self.clone(), level_rx));
+        rt.spawn(backup_loop(self.db.clone(), self.cfg.data_dir.join("backups")));
+        if let Some(since) = locks::lock(&self.rescan_after_restore).take() {
+            self.spawn_rescan(since);
+        }
+    }
+
+    /// Re-adds clips in the capture folder the restored library lost.
+    fn spawn_rescan(self: &Arc<Self>, since: Option<SystemTime>) {
+        let Some(ffmpeg) = self.cfg.ffmpeg.clone() else { return };
+        let me = self.clone();
+        let dir = self.settings().capture_dir.clone();
+        self.spawn(async move {
+            let db = me.db.clone();
+            let found = tokio::task::spawn_blocking(move || crate::rescan::rescan(&db, &ffmpeg, &dir, since, since.is_some()))
+                .await;
+            match found {
+                Ok(Ok(0)) => tracing::info!("[rescan] no clips missing from the restored library"),
+                Ok(Ok(n)) => {
+                    tracing::info!("[rescan] {n} clip(s) re-added");
+                    me.ui.toast(APP_TITLE, &format!("{n} clip(s) saved after the backup were found and added back to the library."));
+                }
+                Ok(Err(e)) => tracing::error!("[rescan] failed: {e:#}"),
+                Err(e) => tracing::error!("[rescan] task failed: {e}"),
+            }
+        });
     }
 
     /// Lets running saves finish (bounded), then stops capture (FFmpeg,
@@ -458,13 +502,35 @@ fn segment_retention(s: &Settings) -> Duration {
     Duration::from_secs(s.max_save_length_s as u64 + 10)
 }
 
+/// Folder for per-save temp dirs (see [`CoreConfig::temp_root`]).
+fn save_temp_root(cfg: &CoreConfig, s: &Settings) -> PathBuf {
+    cfg.temp_root.clone().unwrap_or_else(|| s.buffer_dir.join(crate::settings::SAVE_TEMP_SUBDIR))
+}
+
 fn save_config(cfg: &CoreConfig, s: &Settings) -> SaveConfig {
     SaveConfig {
         ffmpeg: cfg.ffmpeg.clone().unwrap_or_else(|| PathBuf::from("ffmpeg.exe")),
         capture_dir: s.capture_dir.clone(),
         thumbs_dir: cfg.data_dir.join("thumbs"),
-        temp_root: cfg.temp_root.clone(),
+        temp_root: save_temp_root(cfg, s),
         save_length: Duration::from_secs(s.effective_save_length_s() as u64),
+    }
+}
+
+/// How often the backup loop checks for a missing daily backup.
+const BACKUP_CHECK: Duration = Duration::from_secs(3600);
+
+/// Writes the daily library backup while the app keeps running (a tray app
+/// may run for weeks; the startup backup alone would go stale). One per day:
+/// [`db::backup_daily`] skips a day that has one.
+async fn backup_loop(db: Arc<Mutex<Connection>>, dir: PathBuf) {
+    let mut tick = tokio::time::interval(BACKUP_CHECK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // the first tick is immediate; startup already backed up
+    loop {
+        tick.tick().await;
+        let (db, dir) = (db.clone(), dir.clone());
+        let _ = tokio::task::spawn_blocking(move || db::backup_daily(&locks::lock(&db), &dir)).await;
     }
 }
 
@@ -518,7 +584,7 @@ mod tests {
         let cfg = CoreConfig {
             data_dir: data,
             ffmpeg: Some(dir.join("ffmpeg.exe")),
-            temp_root: dir.join("tmp"),
+            temp_root: Some(dir.join("tmp")),
             video_source: VideoSource::TestSrc,
             desktop_kick: false,
         };

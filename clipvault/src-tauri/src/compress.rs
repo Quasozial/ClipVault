@@ -5,7 +5,8 @@
 //! starting mid-encode stops the encode, which is redone afterwards. FFmpeg is
 //! in the kill-on-close job (it dies with ClipVault) and has a timeout. Audio and
 //! metadata are copied untouched; only the video is re-encoded. The result
-//! replaces the original file only when it is clearly smaller; either way the
+//! replaces the original file only when it is clearly smaller and has the
+//! original's streams and duration (probed with FFmpeg); either way the
 //! clip is marked `compressed` and not tried again.
 //!
 //! Encoder: NVIDIA AV1 when this PC has it (fast), otherwise SVT-AV1 on the
@@ -278,6 +279,52 @@ pub fn clean_stale_temps(dir: &Path) -> usize {
     removed
 }
 
+/// Duration and stream count FFmpeg reports for a media file.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MediaInfo {
+    pub duration_s: f64,
+    pub streams: usize,
+}
+
+/// Allowed duration difference between original and compressed file.
+const DURATION_TOLERANCE_S: f64 = 0.5;
+const PROBE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Parses `ffmpeg -i` stderr: the `Duration: HH:MM:SS.xx` line and the
+/// `Stream #0:N` lines of the first input.
+pub fn parse_media_info(stderr: &str) -> Option<MediaInfo> {
+    let line = stderr.lines().find_map(|l| l.trim_start().strip_prefix("Duration: "))?;
+    let hms = line.split(',').next()?.trim();
+    let mut parts = hms.split(':');
+    let (h, m, sec) = (parts.next()?, parts.next()?, parts.next()?);
+    let duration_s = h.parse::<f64>().ok()? * 3600.0 + m.parse::<f64>().ok()? * 60.0 + sec.parse::<f64>().ok()?;
+    let streams = stderr.lines().filter(|l| l.trim_start().starts_with("Stream #0:")).count();
+    Some(MediaInfo { duration_s, streams })
+}
+
+/// Probes `path` with FFmpeg itself (ffprobe is not bundled). `ffmpeg -i`
+/// without an output exits non-zero but prints the input description.
+pub fn probe(ffmpeg: &Path, path: &Path) -> Option<MediaInfo> {
+    let args = vec!["-hide_banner".to_string(), "-i".to_string(), path.display().to_string()];
+    match run_watched(ffmpeg, &args, PROBE_TIMEOUT, &|| false, |_, _| {}) {
+        Run::Finished { stderr, .. } => parse_media_info(&stderr),
+        _ => None,
+    }
+}
+
+/// Ok when the compressed file has the original's streams and duration.
+pub fn same_media(original: Option<MediaInfo>, compressed: Option<MediaInfo>) -> Result<(), String> {
+    let o = original.ok_or("original could not be probed")?;
+    let c = compressed.ok_or("output could not be probed")?;
+    if c.streams != o.streams {
+        return Err(format!("{} stream(s), original has {}", c.streams, o.streams));
+    }
+    if (c.duration_s - o.duration_s).abs() > DURATION_TOLERANCE_S {
+        return Err(format!("{:.2} s long, original {:.2} s", c.duration_s, o.duration_s));
+    }
+    Ok(())
+}
+
 /// Compresses one clip. `Ok(None)`: nothing to do (gone, foreign, done).
 pub fn compress_clip(ffmpeg: &Path, db: &Mutex<Connection>, id: &str, encoder: &str, busy: &dyn Fn() -> bool) -> Result<Outcome> {
     let Some(clip) = clips::get(&locks::lock(db), id)? else { return Ok(Outcome::Done(None)) };
@@ -309,7 +356,17 @@ pub fn compress_clip(ffmpeg: &Path, db: &Mutex<Connection>, id: &str, encoder: &
         }
     }
     let new = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
-    let keep = worth_keeping(original, new);
+    let mut keep = worth_keeping(original, new);
+    if keep {
+        // FFmpeg can exit 0 after stopping early on a damaged input; a short or
+        // stream-less result must never replace the original.
+        let before = probe(ffmpeg, &clip.path);
+        let after = probe(ffmpeg, &tmp);
+        if let Err(why) = same_media(before, after) {
+            tracing::error!("[compress] {}: output rejected, original kept ({why})", clip.path.display());
+            keep = false;
+        }
+    }
     let mut attempt = 0;
     let (conn, size) = loop {
         let conn = locks::lock(db);
@@ -377,6 +434,36 @@ mod tests {
         assert!(worth_keeping(100, 90));
         assert!(!worth_keeping(100, 91));
         assert!(!worth_keeping(100, 0));
+    }
+
+    const FFMPEG_I: &str = "Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'a.mp4':
+  Metadata:
+    encoder         : Lavf61
+  Duration: 00:01:02.50, start: 0.000000, bitrate: 20000 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High)
+  Stream #0:1[0x2](und): Audio: aac
+      Metadata:
+        title           : Mic
+  Stream #0:2[0x3](und): Audio: aac
+  Stream #0:3[0x4](und): Audio: aac
+At least one output file must be specified
+";
+
+    #[test]
+    fn parses_ffmpeg_input_description() {
+        assert_eq!(parse_media_info(FFMPEG_I), Some(MediaInfo { duration_s: 62.5, streams: 4 }));
+        assert_eq!(parse_media_info("a.mp4: Invalid data found when processing input"), None);
+        assert_eq!(parse_media_info("  Duration: N/A, bitrate: N/A"), None);
+    }
+
+    #[test]
+    fn rejects_short_or_stream_losing_output() {
+        let o = Some(MediaInfo { duration_s: 60.0, streams: 4 });
+        assert!(same_media(o, Some(MediaInfo { duration_s: 60.3, streams: 4 })).is_ok());
+        assert!(same_media(o, Some(MediaInfo { duration_s: 41.0, streams: 4 })).is_err());
+        assert!(same_media(o, Some(MediaInfo { duration_s: 60.0, streams: 1 })).is_err());
+        assert!(same_media(o, None).is_err());
+        assert!(same_media(None, o).is_err());
     }
 
     #[test]

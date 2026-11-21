@@ -43,8 +43,11 @@
 //!   with ClipVault even on a crash or force-kill.
 //! * A restart/fail reason carries the root cause: spawn error, exit status,
 //!   FFmpeg's first error line and last line, and the run's log path.
-//! * The partially written segment of a killed run is not in the list and is
-//!   left on disk until the next startup wipe.
+//! * When a run ends, its list CSV and any segment file that never made it
+//!   into the index (the partial segment of a killed process) are deleted
+//!   ([`clean_ended_run`]); only the newest [`KEEP_RUN_LOGS`] FFmpeg logs of a
+//!   session are kept. A watchdog failing for days therefore leaves a bounded
+//!   number of files, not one set per retry.
 use crate::capture::args::{build_capture_args, layout_key, CaptureSpec, VideoSource};
 use crate::capture::segments::{parse_segment_list_line, Segment, SegmentIndex};
 use crate::locks;
@@ -71,6 +74,8 @@ pub const MAX_RESTARTS_IN_WINDOW: usize = 3;
 pub const FAIL_BACKOFF: Duration = Duration::from_secs(10);
 
 const LIST_POLL: Duration = Duration::from_millis(250);
+/// FFmpeg logs of ended runs kept per session (the newest), for diagnosis.
+pub const KEEP_RUN_LOGS: usize = 10;
 const WATCHDOG_TICK: Duration = Duration::from_secs(1);
 /// `CREATE_NO_WINDOW`: no console window flashes up for FFmpeg.
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
@@ -379,6 +384,37 @@ fn wipe_buffer_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Removes what an ended run leaves that nothing will read again: its list
+/// CSV and its segment files not in the index (`indexed`), i.e. the partial
+/// segment of a killed process. Indexed segments are the buffer and stay.
+/// Call after the run's final ingest.
+fn clean_ended_run(dir: &Path, prefix: &str, indexed: &dyn Fn(&Path) -> bool) {
+    let list = dir.join(format!("{prefix}list.csv"));
+    let _ = delete_segment(&list);
+    let seg_prefix = format!("{prefix}seg_");
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !name.starts_with(&seg_prefix) || !is_own_buffer_file(&name) {
+            continue;
+        }
+        let path = e.path();
+        if !indexed(&path) {
+            let _ = delete_segment(&path);
+        }
+    }
+}
+
+/// Remembers an ended run's log and deletes the oldest beyond [`KEEP_RUN_LOGS`].
+fn rotate_run_logs(logs: &mut VecDeque<PathBuf>, ended: PathBuf) {
+    logs.push_back(ended);
+    while logs.len() > KEEP_RUN_LOGS {
+        if let Some(old) = logs.pop_front() {
+            let _ = delete_segment(&old);
+        }
+    }
+}
+
 fn unix_micros(t: SystemTime) -> i64 {
     t.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_micros() as i64)
 }
@@ -534,6 +570,8 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
     tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
     let mut watchdog = WatchdogState::new(Instant::now());
     let layout = layout_key(&spec);
+    let mut ended_logs: VecDeque<PathBuf> = VecDeque::new();
+    let indexed = |p: &Path| locks::lock(&inner.segments).contains(p);
 
     loop {
         run += 1;
@@ -561,6 +599,7 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
                 _ = stop.cancelled() => {
                     kill(&mut child).await;
                     inner.ingest(&mut tailer, run_start, &spec.segment_dir, layout);
+                    clean_ended_run(&spec.segment_dir, &spec.segment_prefix, &indexed);
                     return;
                 }
                 _ = inner.kill_for_test.notified() => {
@@ -627,6 +666,8 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         tracing::warn!("run {run} ended ({} kicks): {next_health:?}", kicks.kicks());
         // Segments closed just before the process died are still indexed.
         inner.ingest(&mut tailer, run_start, &spec.segment_dir, layout);
+        clean_ended_run(&spec.segment_dir, &spec.segment_prefix, &indexed);
+        rotate_run_logs(&mut ended_logs, log_path);
         inner.set_health(next_health);
     }
 }
@@ -1014,6 +1055,43 @@ mod tests {
         drop(f);
         assert!(sup.inner.ingest(&mut tailer, now, dir.path(), 0));
         assert!(!old.exists(), "retried once the lock is gone");
+    }
+
+    /// A run that ends leaves only its indexed segments behind: its list CSV
+    /// and the partial segment of the killed process go, other runs' files and
+    /// foreign files stay.
+    #[test]
+    fn ended_run_leaves_only_indexed_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = run_prefix(&session_token(1), 7);
+        let other = run_prefix(&session_token(1), 8);
+        let kept = dir.path().join(format!("{p}seg_00000001.ts"));
+        let partial = dir.path().join(format!("{p}seg_00000002.ts"));
+        let list = dir.path().join(format!("{p}list.csv"));
+        let log = dir.path().join(format!("{p}ffmpeg.log"));
+        let other_seg = dir.path().join(format!("{other}seg_00000001.ts"));
+        let foreign = dir.path().join("video.ts");
+        for f in [&kept, &partial, &list, &log, &other_seg, &foreign] {
+            std::fs::write(f, b"x").unwrap();
+        }
+        clean_ended_run(dir.path(), &p, &|q| q == kept);
+        assert!(kept.exists() && log.exists() && other_seg.exists() && foreign.exists());
+        assert!(!partial.exists(), "partial segment of the killed run");
+        assert!(!list.exists(), "list CSV of the ended run");
+    }
+
+    #[test]
+    fn only_the_newest_run_logs_are_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut logs = VecDeque::new();
+        let paths: Vec<PathBuf> = (1..=KEEP_RUN_LOGS as u64 + 5).map(|r| dir.path().join(format!("{}ffmpeg.log", run_prefix("ab-1", r)))).collect();
+        for p in &paths {
+            std::fs::write(p, b"log").unwrap();
+            rotate_run_logs(&mut logs, p.clone());
+        }
+        assert_eq!(logs.len(), KEEP_RUN_LOGS);
+        assert!(paths[..5].iter().all(|p| !p.exists()), "oldest deleted");
+        assert!(paths[5..].iter().all(|p| p.exists()), "newest kept");
     }
 
     #[test]

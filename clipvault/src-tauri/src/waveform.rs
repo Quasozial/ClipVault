@@ -16,6 +16,9 @@ const ENVELOPE_RATE: u32 = 8_000;
 /// Cache format version; bump when the files' layout changes.
 const CACHE_VERSION: u32 = 1;
 const EXTRACT_TIMEOUT: Duration = Duration::from_secs(120);
+/// Total size of cached per-track audio; the least recently opened clips'
+/// tracks are evicted beyond it (they are re-extracted when opened again).
+pub const CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -189,6 +192,10 @@ pub fn audio_tracks(ffmpeg: &Path, video: &Path, cache_dir: &Path, id: &str) -> 
                 && m.source_mtime == source_mtime
                 && m.tracks.iter().all(|t| Path::new(&t.path).is_file())
             {
+                // Marks the clip as recently used for eviction.
+                if let Ok(f) = std::fs::File::options().write(true).open(&meta_path) {
+                    let _ = f.set_modified(std::time::SystemTime::now());
+                }
                 return Ok(m.tracks);
             }
         }
@@ -237,7 +244,61 @@ pub fn audio_tracks(ffmpeg: &Path, video: &Path, cache_dir: &Path, id: &str) -> 
     if let Err(e) = std::fs::write(&meta_path, serde_json::to_vec(&meta)?) {
         tracing::warn!("audio cache: writing {}: {e}", meta_path.display());
     }
+    let evicted = evict(cache_dir, &safe, CACHE_MAX_BYTES);
+    if evicted > 0 {
+        tracing::info!("audio cache: evicted tracks of {evicted} clip(s)");
+    }
     Ok(tracks)
+}
+
+/// Clip key of a cache file: `{safe}.audio.json` or `{safe}.a{n}.m4a` / `.f32`.
+fn cache_key(name: &str) -> Option<&str> {
+    if let Some(k) = name.strip_suffix(".audio.json") {
+        return Some(k);
+    }
+    let stem = name.strip_suffix(".m4a").or_else(|| name.strip_suffix(".f32"))?;
+    let (k, n) = stem.rsplit_once(".a")?;
+    (!n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())).then_some(k)
+}
+
+/// Deletes whole clips' cached audio, least recently used first (newest file
+/// time of the clip's cache files), until the total is at most `max_bytes`.
+/// Never touches `keep` (the clip just opened) or non-cache files such as
+/// thumbnails. Returns how many clips were evicted.
+pub fn evict(cache_dir: &Path, keep: &str, max_bytes: u64) -> usize {
+    use std::collections::HashMap;
+    let Ok(rd) = std::fs::read_dir(cache_dir) else { return 0 };
+    // key -> (bytes, last used, files)
+    let mut groups: HashMap<String, (u64, std::time::SystemTime, Vec<PathBuf>)> = HashMap::new();
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(key) = cache_key(&name) else { continue };
+        let Ok(m) = e.metadata() else { continue };
+        if !m.is_file() {
+            continue;
+        }
+        let used = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+        let g = groups.entry(key.to_string()).or_insert((0, std::time::UNIX_EPOCH, Vec::new()));
+        g.0 += m.len();
+        g.1 = g.1.max(used);
+        g.2.push(e.path());
+    }
+    let mut total: u64 = groups.values().map(|g| g.0).sum();
+    let mut order: Vec<(String, u64, std::time::SystemTime, Vec<PathBuf>)> =
+        groups.into_iter().filter(|(k, _)| k != keep).map(|(k, (b, t, f))| (k, b, t, f)).collect();
+    order.sort_by_key(|g| g.2);
+    let mut evicted = 0;
+    for (_, bytes, _, files) in order {
+        if total <= max_bytes {
+            break;
+        }
+        for f in files {
+            let _ = std::fs::remove_file(f);
+        }
+        total = total.saturating_sub(bytes);
+        evicted += 1;
+    }
+    evicted
 }
 
 /// Removes the cached audio of clip `id` (after the clip is deleted).
@@ -298,6 +359,41 @@ mod tests {
         assert_eq!(classify("Discord", 1, 3), ("Voice chat".to_string(), "voice"));
         assert_eq!(classify("", 1, 2), ("Microphone".to_string(), "mic"));
         assert_eq!(classify("", 0, 1), ("Audio 1".to_string(), "other"));
+    }
+
+    #[test]
+    fn cache_keys_cover_only_audio_cache_files() {
+        assert_eq!(cache_key("abc-1.audio.json"), Some("abc-1"));
+        assert_eq!(cache_key("abc-1.a0.m4a"), Some("abc-1"));
+        assert_eq!(cache_key("abc-1.a12.f32"), Some("abc-1"));
+        assert_eq!(cache_key("abc-1.jpg"), None);
+        assert_eq!(cache_key("abc-1.a.m4a"), None);
+        assert_eq!(cache_key("abc-1.ax.m4a"), None);
+    }
+
+    /// Over the cap, whole clips go, least recently used first; the clip just
+    /// opened and thumbnails are never removed.
+    #[test]
+    fn eviction_drops_least_recently_used_clips() {
+        let dir = tempfile::tempdir().unwrap();
+        let t0 = std::time::SystemTime::now() - Duration::from_secs(1000);
+        let put = |name: &str, len: usize, age: u64| {
+            let p = dir.path().join(name);
+            std::fs::write(&p, vec![0u8; len]).unwrap();
+            std::fs::File::options().write(true).open(&p).unwrap().set_modified(t0 + Duration::from_secs(age)).unwrap();
+            p
+        };
+        let old = [put("old.a0.m4a", 400, 1), put("old.audio.json", 10, 1)];
+        let mid = [put("mid.a0.m4a", 400, 2), put("mid.a1.m4a", 100, 2), put("mid.audio.json", 10, 2)];
+        let new = [put("new.a0.m4a", 400, 3), put("new.audio.json", 10, 3)];
+        let cur = [put("cur.a0.m4a", 400, 0), put("cur.audio.json", 10, 0)];
+        let thumb = put("old.jpg", 5000, 0);
+        // Total audio 1740; cap 1000 => evict old (410) and mid (510).
+        assert_eq!(evict(dir.path(), "cur", 1000), 2);
+        assert!(old.iter().chain(&mid).all(|p| !p.exists()));
+        assert!(new.iter().chain(&cur).all(|p| p.exists()));
+        assert!(thumb.exists());
+        assert_eq!(evict(dir.path(), "cur", 1000), 0);
     }
 
     #[test]

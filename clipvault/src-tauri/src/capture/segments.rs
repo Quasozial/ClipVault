@@ -71,6 +71,11 @@ impl SegmentIndex {
         removed
     }
 
+    /// Whether a segment with this file is in the index.
+    pub fn contains(&self, path: &Path) -> bool {
+        self.segments.iter().any(|s| s.path == path)
+    }
+
     pub fn latest_end(&self) -> Option<SystemTime> {
         self.segments.iter().map(|s| s.end).max()
     }

@@ -84,7 +84,8 @@ pub struct SaveConfig {
     pub capture_dir: PathBuf,
     /// `%LOCALAPPDATA%\ClipVault\thumbs`.
     pub thumbs_dir: PathBuf,
-    /// Parent of the per-save `clipvault-save-{uuid}` dir; normally `%TEMP%`.
+    /// Parent of the per-save `clipvault-save-{uuid}` dir; in the app a folder
+    /// next to the buffer (same volume: hard links, not copies).
     pub temp_root: PathBuf,
     pub save_length: Duration,
 }
@@ -423,6 +424,23 @@ async fn make_thumbnail(cfg: &SaveConfig, video: &Path, id: &str, duration_s: f6
 /// Removes the per-save temp dir on drop.
 struct TempDir(PathBuf);
 
+/// Removes `clipvault-save-*` folders directly in `root` (left by a save cut
+/// short by a crash or power loss); returns how many. Call before any save runs.
+pub fn clean_stale_save_dirs(root: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(root) else { return 0 };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if name.starts_with("clipvault-save-") && e.file_type().is_ok_and(|t| t.is_dir()) {
+            match std::fs::remove_dir_all(e.path()) {
+                Ok(()) => removed += 1,
+                Err(err) => tracing::warn!("could not remove stale save folder {:?}: {err}", e.path()),
+            }
+        }
+    }
+    removed
+}
+
 impl Drop for TempDir {
     fn drop(&mut self) {
         match std::fs::remove_dir_all(&self.0) {
@@ -547,6 +565,20 @@ pub fn last_stderr_line(stderr: &str) -> Option<String> {
 mod tests {
     use super::*;
     use chrono::TimeZone;
+
+    #[test]
+    fn stale_save_dirs_are_removed_only_by_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = dir.path().join("clipvault-save-1234");
+        std::fs::create_dir_all(&stale).unwrap();
+        std::fs::write(stale.join("seg.ts"), b"x").unwrap();
+        let other = dir.path().join("my-folder");
+        std::fs::create_dir_all(&other).unwrap();
+        std::fs::write(dir.path().join("clipvault-save-file"), b"x").unwrap();
+        assert_eq!(clean_stale_save_dirs(dir.path()), 1);
+        assert!(!stale.exists() && other.exists() && dir.path().join("clipvault-save-file").exists());
+        assert_eq!(clean_stale_save_dirs(&dir.path().join("missing")), 0);
+    }
 
     fn t0() -> SystemTime {
         SystemTime::UNIX_EPOCH + Duration::from_secs(2_000_000)

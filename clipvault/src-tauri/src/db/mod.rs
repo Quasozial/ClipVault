@@ -169,6 +169,12 @@ fn newest_backup(dir: &Path) -> Option<(PathBuf, String)> {
     backups_in(dir).pop()
 }
 
+/// When the newest backup in `dir` was written (its file time), if any.
+pub fn newest_backup_time(dir: &Path) -> Option<std::time::SystemTime> {
+    let (path, _) = newest_backup(dir)?;
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// Writes a consistent copy of the library to `dir/library-<day>.db`
 /// (replacing that day's copy) and keeps only the newest [`MAX_BACKUPS`].
 pub fn backup(conn: &Connection, dir: &Path, day: &str) -> Result<()> {
