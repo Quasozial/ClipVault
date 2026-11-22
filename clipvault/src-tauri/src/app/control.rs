@@ -61,10 +61,6 @@ pub(super) async fn control_loop(
     .await;
     // Before the first capture: which video encoders this PC can run.
     let encoders = core.probe_encoders().await;
-    let hdr_gpu = match core.cfg.ffmpeg.clone() {
-        Some(ff) => tokio::task::spawn_blocking(move || crate::capture::encoders::probe_hdr_gpu(&ff)).await.unwrap_or(false),
-        None => false,
-    };
     core.compressor.start(encoders.clone(), {
         let c = core.clone();
         // Re-encoding waits while a game is recorded, so it never costs frames.
@@ -83,7 +79,6 @@ pub(super) async fn control_loop(
         core.cfg.ffmpeg.is_some(),
         core.rl_connected.clone(),
         encoders,
-        hdr_gpu,
     );
     let mut watcher = GameWatcher::new();
     let mut tick = interval(WATCH_INTERVAL);

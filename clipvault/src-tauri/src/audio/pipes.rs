@@ -48,7 +48,7 @@ const BYTES_PER_FRAME: usize = CHANNELS * 4;
 /// Pipe outbound buffer: about 1 s of audio.
 const PIPE_BUFFER_BYTES: u32 = SAMPLE_RATE * BYTES_PER_FRAME as u32;
 /// How often the server thread re-checks its stop flag while waiting.
-const POLL: Duration = Duration::from_millis(10);
+pub(crate) const POLL: Duration = Duration::from_millis(10);
 /// Owner and SYSTEM only, protected from inheritance.
 const PIPE_SDDL: &str = "D:P(A;;GA;;;OW)(A;;GA;;;SY)";
 
@@ -145,7 +145,7 @@ impl PipeWriter {
     /// The pipe is accepting clients when this returns.
     pub fn new(pipe_name: &str) -> Result<PipeWriter> {
         let wide: Vec<u16> = format!(r"\\.\pipe\{pipe_name}").encode_utf16().chain([0]).collect();
-        let mut first = Instance::create(&wide, true).with_context(|| format!("creating pipe {pipe_name}"))?;
+        let mut first = Instance::create(&wide, true, PIPE_BUFFER_BYTES).with_context(|| format!("creating pipe {pipe_name}"))?;
         first.begin_connect().with_context(|| format!("listening on pipe {pipe_name}"))?;
         let shared = Arc::new(Shared {
             queue: Mutex::new(SampleQueue::new(QUEUE_FRAMES)),
@@ -205,8 +205,9 @@ fn hr(code: WIN32_ERROR) -> HRESULT {
     HRESULT::from_win32(code.0)
 }
 
-/// One pipe instance with its own overlapped state.
-struct Instance {
+/// One pipe instance with its own overlapped state. Also used by the video
+/// frame pipe (`capture::hdr_grab`).
+pub(crate) struct Instance {
     pipe: HANDLE,
     event: HANDLE,
     /// Boxed: the kernel holds a pointer to it while an operation is pending.
@@ -218,7 +219,7 @@ struct Instance {
 unsafe impl Send for Instance {}
 
 impl Instance {
-    fn create(wide_name: &[u16], first: bool) -> Result<Instance> {
+    pub(crate) fn create(wide_name: &[u16], first: bool, buffer_bytes: u32) -> Result<Instance> {
         let mut sd = PSECURITY_DESCRIPTOR::default();
         let sddl: Vec<u16> = PIPE_SDDL.encode_utf16().chain([0]).collect();
         unsafe {
@@ -240,7 +241,7 @@ impl Instance {
                 open_mode,
                 PIPE_TYPE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                 PIPE_UNLIMITED_INSTANCES,
-                PIPE_BUFFER_BYTES,
+                buffer_bytes,
                 0,
                 0,
                 Some(&sa),
@@ -270,7 +271,7 @@ impl Instance {
     }
 
     /// Start listening. Returns true if a client was already connected.
-    fn begin_connect(&mut self) -> Result<bool> {
+    pub(crate) fn begin_connect(&mut self) -> Result<bool> {
         self.reset_ov();
         match unsafe { ConnectNamedPipe(self.pipe, Some(&mut *self.ov)) } {
             Ok(()) => Ok(true),
@@ -285,7 +286,7 @@ impl Instance {
 
     /// Wait up to `timeout` for the pending operation. `Some(bytes)` once it has
     /// completed (or if nothing was pending), `None` while still in progress.
-    fn poll(&mut self, timeout: Duration) -> Result<Option<u32>> {
+    pub(crate) fn poll(&mut self, timeout: Duration) -> Result<Option<u32>> {
         if !self.pending {
             return Ok(Some(0));
         }
@@ -305,7 +306,7 @@ impl Instance {
     }
 
     /// Write all of `bytes`, waiting as long as needed unless `stop` is set.
-    fn write_all(&mut self, mut bytes: &[u8], stop: &AtomicBool) -> Result<()> {
+    pub(crate) fn write_all(&mut self, mut bytes: &[u8], stop: &AtomicBool) -> Result<()> {
         while !bytes.is_empty() {
             self.reset_ov();
             self.pending = true;
@@ -356,7 +357,7 @@ fn serve(name: &str, wide: Vec<u16>, first: Instance, sh: &Shared) {
     while !sh.stop.load(Ordering::SeqCst) {
         // 1. Keep one listening instance; promote it when a client connects.
         if listening.is_none() && Instant::now() >= retry_at {
-            match Instance::create(&wide, false).and_then(|mut i| i.begin_connect().map(|_| i)) {
+            match Instance::create(&wide, false, PIPE_BUFFER_BYTES).and_then(|mut i| i.begin_connect().map(|_| i)) {
                 Ok(i) => {
                     *sh.last_error.lock().unwrap() = None;
                     listening = Some(i);

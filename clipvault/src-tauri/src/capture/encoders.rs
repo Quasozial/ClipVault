@@ -36,27 +36,6 @@ fn probe_one(ffmpeg: &Path, encoder: Encoder) -> bool {
     run_probe(ffmpeg, &probe_args(encoder), &format!("encoder {encoder:?}"))
 }
 
-/// FFmpeg arguments for the HDR probe: FP16 frames through the HDR output
-/// filter (Vulkan upload + libplacebo), thrown away.
-pub fn hdr_probe_args() -> Vec<String> {
-    let mut a: Vec<String> = super::args::HDR_HW_DEVICE.iter().map(|s| s.to_string()).collect();
-    a.extend(
-        ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "color=gray:s=640x360:r=30,format=rgba64le", "-frames:v", "3", "-filter:v"]
-            .iter()
-            .map(|s| s.to_string()),
-    );
-    a.push(super::args::hdr_output_filter(320, 180, 3.0));
-    a.extend(["-f", "null", "-"].iter().map(|s| s.to_string()));
-    a
-}
-
-/// Whether the HDR capture path (Vulkan + libplacebo) runs on this PC.
-pub fn probe_hdr_gpu(ffmpeg: &Path) -> bool {
-    let ok = run_probe(ffmpeg, &hdr_probe_args(), "HDR conversion (Vulkan/libplacebo)");
-    tracing::info!("HDR conversion on GPU available: {ok}");
-    ok
-}
-
 fn run_probe(ffmpeg: &Path, args: &[String], label: &str) -> bool {
     let mut cmd = Command::new(ffmpeg);
     cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());

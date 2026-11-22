@@ -48,7 +48,8 @@
 //!   ([`clean_ended_run`]); only the newest [`KEEP_RUN_LOGS`] FFmpeg logs of a
 //!   session are kept. A watchdog failing for days therefore leaves a bounded
 //!   number of files, not one set per retry.
-use crate::capture::args::{build_capture_args, layout_key, CaptureSpec, VideoSource};
+use crate::capture::args::{build_capture_args, hdr_pipe_name, layout_key, CaptureSpec, VideoSource};
+use crate::capture::hdr_grab::{HdrGrabConfig, HdrGrabber};
 use crate::capture::segments::{parse_segment_list_line, Segment, SegmentIndex};
 use crate::locks;
 use std::collections::VecDeque;
@@ -585,12 +586,31 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         let mut spawn_error: Option<String> = None;
         let mut exit: Option<String> = None;
         let mut kicks = KickBudget::default();
-        let mut child = match spawn_ffmpeg(&inner.ffmpeg, &spec) {
-            Ok(c) => Some(c),
-            Err(e) => {
-                tracing::error!("failed to spawn {:?}: {e}", inner.ffmpeg);
-                spawn_error = Some(format!("{} ({e})", inner.ffmpeg.display()));
-                None
+        // HDR desktop: our own grabber feeds FFmpeg; its pipe must listen
+        // before FFmpeg opens it. It never needs a desktop kick.
+        let grab = hdr_grab_config(&spec);
+        let uses_ddagrab = spec.video_source == VideoSource::Ddagrab && grab.is_none();
+        let mut grabber: Option<HdrGrabber> = None;
+        if let Some(cfg) = grab {
+            match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg)).await {
+                Ok(Ok(g)) => grabber = Some(g),
+                Ok(Err(e)) => {
+                    tracing::error!("HDR capture could not start: {e:#}");
+                    spawn_error = Some(format!("HDR capture: {e:#}"));
+                }
+                Err(e) => spawn_error = Some(format!("HDR capture: {e}")),
+            }
+        }
+        let mut child = if spawn_error.is_some() {
+            None
+        } else {
+            match spawn_ffmpeg(&inner.ffmpeg, &spec) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::error!("failed to spawn {:?}: {e}", inner.ffmpeg);
+                    spawn_error = Some(format!("{} ({e})", inner.ffmpeg.display()));
+                    None
+                }
             }
         };
 
@@ -598,6 +618,7 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
             tokio::select! {
                 _ = stop.cancelled() => {
                     kill(&mut child).await;
+                    drop_grabber(grabber.take()).await;
                     inner.ingest(&mut tailer, run_start, &spec.segment_dir, layout);
                     clean_ended_run(&spec.segment_dir, &spec.segment_prefix, &indexed);
                     return;
@@ -630,7 +651,7 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
                         None => false,
                     };
                     let now = Instant::now();
-                    if spec.video_source == VideoSource::Ddagrab && kick_due(now, process_started, last_segment, alive) {
+                    if uses_ddagrab && kick_due(now, process_started, last_segment, alive) {
                         let kick = locks::read(&inner.kick).clone();
                         if let Some(kick) = kick {
                             match kicks.on_due(watchdog.is_failing()) {
@@ -656,6 +677,7 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
             }
         };
         kill(&mut child).await;
+        drop_grabber(grabber.take()).await;
         // Root cause for the UI and the log: spawn error, exit status, FFmpeg's stderr.
         let detail = failure_detail(spawn_error.as_deref(), exit.as_deref(), &read_log_tail(&log_path), &log_path);
         let next_health = match next_health {
@@ -669,6 +691,30 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         clean_ended_run(&spec.segment_dir, &spec.segment_prefix, &indexed);
         rotate_run_logs(&mut ended_logs, log_path);
         inner.set_health(next_health);
+    }
+}
+
+/// Grabber settings for an HDR run, `None` when FFmpeg captures by itself.
+fn hdr_grab_config(spec: &CaptureSpec) -> Option<HdrGrabConfig> {
+    let white = spec.hdr_sdr_white.filter(|_| spec.video_source == VideoSource::Ddagrab)?;
+    Some(HdrGrabConfig {
+        output_idx: spec.output_idx,
+        fps: spec.fps,
+        out_w: spec.out_w,
+        out_h: spec.out_h,
+        sdr_white: white,
+        pipe_name: hdr_pipe_name(spec),
+    })
+}
+
+/// Stops a grabber (joins its threads) off the async workers.
+async fn drop_grabber(g: Option<HdrGrabber>) {
+    if let Some(g) = g {
+        let dropped = g.dropped_frames();
+        if dropped > 0 {
+            tracing::warn!("HDR capture: {dropped} frames dropped because FFmpeg read too slowly");
+        }
+        let _ = tokio::task::spawn_blocking(move || drop(g)).await;
     }
 }
 

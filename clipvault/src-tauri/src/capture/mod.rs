@@ -5,3 +5,4 @@ pub mod display;
 pub mod supervisor;
 pub mod kick;
 pub mod job;
+pub mod hdr_grab;

@@ -83,8 +83,6 @@ pub struct CaptureController {
     encoders: Vec<Encoder>,
     /// Encoder notices already shown (once per process each).
     notices_shown: Vec<String>,
-    /// FFmpeg can convert FP16 HDR captures on the GPU (Vulkan + libplacebo).
-    hdr_gpu: bool,
 }
 
 impl CaptureController {
@@ -98,7 +96,6 @@ impl CaptureController {
         ffmpeg_found: bool,
         rl_connected: Arc<AtomicBool>,
         encoders: Vec<Encoder>,
-        hdr_gpu: bool,
     ) -> Self {
         Self {
             supervisor,
@@ -116,7 +113,6 @@ impl CaptureController {
             force_primary: false,
             encoders,
             notices_shown: Vec::new(),
-            hdr_gpu,
         }
     }
 
@@ -136,20 +132,10 @@ impl CaptureController {
         enc
     }
 
-    /// SDR white in scRGB units for the FP16 HDR path, or `None` for the 8-bit
-    /// path (SDR monitor, or no GPU conversion: then SDR content is recorded
-    /// too bright, which is toasted once).
-    fn hdr_sdr_white(&mut self, display: &crate::capture::display::DisplayInfo) -> Option<f32> {
+    /// SDR white in scRGB units for the native FP16 HDR grabber
+    /// (`capture::hdr_grab`), or `None` for ddagrab's 8-bit path (SDR monitor).
+    fn hdr_sdr_white(&self, display: &crate::capture::display::DisplayInfo) -> Option<f32> {
         if !display.hdr || self.video_source != VideoSource::Ddagrab {
-            return None;
-        }
-        if !self.hdr_gpu {
-            let n = "HDR is on but GPU conversion (Vulkan) is unavailable – recordings may look too bright".to_string();
-            if !self.notices_shown.contains(&n) {
-                tracing::warn!("{n}");
-                self.ui.toast(APP_TITLE, &n);
-                self.notices_shown.push(n);
-            }
             return None;
         }
         // Unknown level: Windows' default SDR content brightness (200 nits).
@@ -260,14 +246,18 @@ impl CaptureController {
         }
         let pipes: Vec<AudioPipe> = self.audio.as_ref().map(|a| a.pipes.clone()).unwrap_or_default();
         // c. Spec + capture info, before every start.
-        let (out_w, out_h) = output_size(s.output_height);
+        let hdr_sdr_white = self.hdr_sdr_white(&display);
+        let (mut out_w, out_h) = output_size(s.output_height);
+        if hdr_sdr_white.is_some() {
+            out_w = out_w.div_ceil(4) * 4; // the HDR shader writes 4 pixels per store
+        }
         let encoder = self.pick_encoder(s.encoder);
         let spec = CaptureSpec {
             output_idx,
             fps: s.fps,
             out_w,
             out_h,
-            hdr_sdr_white: self.hdr_sdr_white(&display),
+            hdr_sdr_white,
             encoder,
             bitrate_kbps: s.bitrate_kbps,
             audio_inputs: pipes.iter().cloned().map(AudioInput::Pipe).collect(),

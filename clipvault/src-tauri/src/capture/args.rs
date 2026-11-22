@@ -29,9 +29,11 @@ pub struct CaptureSpec {
     pub fps: u32,
     pub out_w: u32,
     pub out_h: u32,
-    /// `Some(scale)` on an HDR desktop when the GPU path is usable: capture in
-    /// FP16 scRGB and divide by `scale` (SDR white in scRGB units, e.g. 3.0 for
-    /// 240 nits) so SDR content keeps its on-screen brightness. `None`: 8-bit path.
+    /// `Some(scale)` on an HDR desktop: the native grabber (`capture::hdr_grab`)
+    /// captures FP16 scRGB, divides by `scale` (SDR white in scRGB units, e.g.
+    /// 3.0 for 240 nits) so SDR content keeps its on-screen brightness, and
+    /// streams NV12 over [`hdr_pipe_name`]. `None`: ddagrab, 8-bit path.
+    /// Ddagrab source only.
     pub hdr_sdr_white: Option<f32>,
     pub encoder: Encoder,
     pub bitrate_kbps: u32,
@@ -45,31 +47,22 @@ pub struct CaptureSpec {
     pub wallclock_origin_us: i64,
 }
 
-/// Video source graph for ddagrab. Verified on hardware in Task 4 (RTX 5090,
-/// FFmpeg N-127043, three HDR-enabled monitors).
+/// Video source graph for ddagrab on an SDR desktop. Verified on hardware in
+/// Task 4 (RTX 5090, FFmpeg N-127043, three HDR-enabled monitors).
 ///
-/// * SDR desktop: 8-bit BGRA (`output_fmt=8bit`), scaled on the CPU: `scale_d3d11`
-///   fails to allocate its output pool on NVIDIA (CreateTexture2D E_INVALIDARG).
-///   ~0.9 CPU core for 3840x2160@60 -> 1920x1080.
-/// * HDR desktop: the 8-bit (and 10-bit) Desktop Duplication formats are
-///   scRGB clamped at 1.0 = 80 nits, i.e. SDR content at the "SDR content
-///   brightness" level (e.g. 240 nits = 3.0) arrives 3x too bright with
-///   everything above a third clipped (measured 2026-11-22 against FP16). So
-///   the HDR graph captures FP16 (`rgbaf16`) and only downloads it here; the
-///   output filter ([`hdr_output_filter`]) uploads it to Vulkan where
-///   libplacebo scales, divides by SDR white and encodes sRGB.
-///   No GPU route from ddagrab's D3D11 frames exists in this FFmpeg (`hwmap` to
-///   Vulkan/CUDA/OpenCL fails with ENOSYS) and swscale's FP16 path runs ~35 fps
-///   at 4K on 5 cores, hence the download/upload round trip (~1.5 cores, ~50 fps
-///   at 4K). Highlights above SDR white are clipped, not tone-mapped.
+/// 8-bit BGRA (`output_fmt=8bit`), scaled on the CPU: `scale_d3d11` fails to
+/// allocate its output pool on NVIDIA (CreateTexture2D E_INVALIDARG).
+/// ~0.9 CPU core for 3840x2160@60 -> 1920x1080.
+///
+/// HDR desktops do not use ddagrab: its 8-bit (and 10-bit) formats are scRGB
+/// clamped at 1.0 = 80 nits, so SDR content at the "SDR content brightness"
+/// level (e.g. 240 nits = 3.0) arrives 3x too bright with everything above a
+/// third clipped, and its FP16 frames cannot be converted on the GPU by this
+/// FFmpeg (no `hwmap` from D3D11 to Vulkan/CUDA/OpenCL). The old FP16 graph
+/// (download, Vulkan upload, libplacebo, download) managed ~50 fps at 4K idle
+/// and ~36 fps next to a game. See `capture::hdr_grab` and [`hdr_pipe_input`].
 fn video_filter_graph(spec: &CaptureSpec) -> String {
     let (i, fps, w, h) = (spec.output_idx, spec.fps, spec.out_w, spec.out_h);
-    if spec.hdr_sdr_white.is_some() {
-        return format!(
-            "ddagrab=output_idx={i}:framerate={fps}:draw_mouse=1:output_fmt=rgbaf16,{},hwdownload,format=rgbaf16le",
-            origin_stamp(spec.wallclock_origin_us, "")
-        );
-    }
     format!(
         // The origin stamp comes straight after ddagrab (it only touches timestamps,
         // so D3D11 frames pass): time(0) for frame 0 must be read before the
@@ -109,19 +102,33 @@ fn origin_secs(t0_us: i64) -> String {
 /// set on the frames here. Matrix and range come from the scale and output options.
 const TAG_709: &str = "setparams=color_primaries=bt709:color_trc=bt709";
 
-/// Global options for the HDR path: a Vulkan device for `hwupload`/libplacebo.
-pub const HDR_HW_DEVICE: [&str; 4] = ["-init_hw_device", "vulkan=vk", "-filter_hw_device", "vk"];
+/// Named pipe the HDR grabber serves for one run (unique per process and run).
+pub fn hdr_pipe_name(spec: &CaptureSpec) -> String {
+    format!("clipvault-video-{}-{}", std::process::id(), spec.segment_prefix.trim_end_matches('_'))
+}
 
-/// Output video filter for the HDR path: linear scRGB in, BT.709 NV12 out.
-/// libplacebo's `contrast` multiplies before linearization, which for linear
-/// input is a plain scale: SDR white (`sdr_white` in scRGB) becomes 1.0.
-/// Output is sRGB-encoded and tagged BT.709 like the SDR path.
-pub fn hdr_output_filter(w: u32, h: u32, sdr_white: f32) -> String {
+/// Input options for the HDR grabber's pipe: NV12 at the recording size,
+/// already BT.709 limited range. Frames are stamped with their wall-clock read
+/// time (quantised to 1/fps; the grabber writes just before each boundary).
+fn hdr_pipe_input(spec: &CaptureSpec) -> Vec<String> {
+    let size = format!("{}x{}", spec.out_w, spec.out_h);
+    let path = format!(r"\\.\pipe\{}", hdr_pipe_name(spec));
+    ["-use_wallclock_as_timestamps", "1", "-f", "rawvideo", "-pixel_format", "nv12", "-video_size", &size]
+        .into_iter()
+        .map(String::from)
+        .chain(["-framerate".into(), spec.fps.to_string(), "-i".into(), path])
+        .collect()
+}
+
+/// Output video filter for the HDR pipe: wall-clock timestamps minus T0 and
+/// minus the grabber's readback delay, on a µs time base so T0 keeps its
+/// precision; BT.709 tags like the SDR path.
+fn hdr_pipe_filter(spec: &CaptureSpec) -> String {
+    let lat = crate::capture::hdr_grab::PIPE_LATENCY_FRAMES;
     format!(
-        "setparams=color_primaries=bt709:color_trc=linear:colorspace=gbr:range=pc,hwupload,\
-         libplacebo=w={w}:h={h}:format=nv12:colorspace=bt709:color_primaries=bt709:\
-         color_trc=iec61966-2-1:range=tv:contrast={:.5},hwdownload,format=nv12,{TAG_709}",
-        1.0 / sdr_white.max(1.0)
+        "settb=AVTB,setpts=PTS-{}/TB-{lat}/{}/TB,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709",
+        origin_secs(spec.wallclock_origin_us),
+        spec.fps
     )
 }
 
@@ -187,10 +194,11 @@ pub fn build_capture_args(spec: &CaptureSpec) -> Vec<String> {
     let t0 = origin_secs(spec.wallclock_origin_us);
 
     match spec.video_source {
+        VideoSource::Ddagrab if spec.hdr_sdr_white.is_some() => {
+            let input = hdr_pipe_input(spec);
+            push(&input.iter().map(String::as_str).collect::<Vec<_>>());
+        }
         VideoSource::Ddagrab => {
-            if spec.hdr_sdr_white.is_some() {
-                push(&HDR_HW_DEVICE);
-            }
             let g = video_filter_graph(spec);
             push(&["-f", "lavfi", "-i", &g]);
         }
@@ -227,8 +235,8 @@ pub fn build_capture_args(spec: &CaptureSpec) -> Vec<String> {
 
     if spec.video_source == VideoSource::TestSrc {
         push(&["-pix_fmt", "yuv420p"]);
-    } else if let Some(white) = spec.hdr_sdr_white {
-        push(&["-filter:v", &hdr_output_filter(spec.out_w, spec.out_h, white)]);
+    } else if spec.hdr_sdr_white.is_some() {
+        push(&["-filter:v", &hdr_pipe_filter(spec)]);
     }
     a.extend(video_codec_args(spec.encoder, spec.fps, spec.bitrate_kbps));
     let mut push = |items: &[&str]| a.extend(items.iter().map(|s| s.to_string()));
@@ -440,19 +448,23 @@ mod tests {
 
     const SCALE_1080: &str = "hwdownload,format=bgra,scale=1920:1080:flags=fast_bilinear:out_color_matrix=bt709:out_range=tv,format=nv12,setparams=color_primaries=bt709:color_trc=bt709";
 
-    /// On an HDR desktop the 8-bit DDA format is scRGB clamped at 80 nits
-    /// (overbright SDR content), so HDR captures FP16 and converts on Vulkan.
+    /// On an HDR desktop the native grabber converts on the GPU and FFmpeg
+    /// reads ready NV12 from its pipe: no ddagrab, no Vulkan, no CPU scaling.
     #[test]
-    fn hdr_args_capture_fp16_and_scale_by_sdr_white() {
+    fn hdr_args_read_nv12_from_grabber_pipe() {
         let mut s = spec();
         s.hdr_sdr_white = Some(3.0);
         let v = build_capture_args(&s);
         let a = joined(&v);
-        assert!(a.starts_with("-y -hide_banner -loglevel warning -copyts -init_hw_device vulkan=vk -filter_hw_device vk -f lavfi -i "), "{a}");
-        assert!(a.contains(&format!("ddagrab=output_idx=1:framerate=60:draw_mouse=1:output_fmt=rgbaf16,{STAMP_V},hwdownload,format=rgbaf16le ")), "{a}");
+        let pipe = hdr_pipe_name(&s);
+        assert!(pipe.starts_with("clipvault-video-") && pipe.ends_with("-r3"), "{pipe}");
+        let input = format!(
+            r"-y -hide_banner -loglevel warning -copyts -use_wallclock_as_timestamps 1 -f rawvideo -pixel_format nv12 -video_size 1920x1080 -framerate 60 -i \\.\pipe\{pipe} "
+        );
+        assert!(a.starts_with(&input), "{a}");
         let vf = v.iter().position(|x| x == "-filter:v").map(|i| v[i + 1].clone()).expect("-filter:v");
-        assert_eq!(vf, "setparams=color_primaries=bt709:color_trc=linear:colorspace=gbr:range=pc,hwupload,libplacebo=w=1920:h=1080:format=nv12:colorspace=bt709:color_primaries=bt709:color_trc=iec61966-2-1:range=tv:contrast=0.33333,hwdownload,format=nv12,setparams=color_primaries=bt709:color_trc=bt709");
-        assert!(!a.contains("8bit") && !a.contains("hwmap"), "{a}");
+        assert_eq!(vf, format!("settb=AVTB,setpts=PTS-{T0_S}/TB-1/60/TB,setparams=range=tv:colorspace=bt709:color_primaries=bt709:color_trc=bt709"));
+        assert!(!a.contains("ddagrab") && !a.contains("vulkan") && !a.contains("scale="), "{a}");
         assert!(a.contains(COLOR_TAGS), "{a}");
     }
 
