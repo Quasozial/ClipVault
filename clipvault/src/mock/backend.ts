@@ -128,6 +128,20 @@ ${field ? `<path d="M0 120 L320 104 L320 180 L0 180Z" fill="hsl(${110 + r() * 30
   return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
 }
 
+/** 8 frames side by side (2560x180), the ball moving across, like a real scrub strip. */
+function stripSvg(clip: Clip | undefined, seed: number): string {
+  const r = rng(seed + 29);
+  const hue = HUES[clip?.game ?? ""] ?? 200;
+  const y0 = 50 + r() * 60;
+  const frames = Array.from({ length: 8 }, (_, i) => {
+    const x = 30 + i * 34 + r() * 10;
+    const y = y0 + Math.sin(i * 0.9) * 25;
+    return `<g transform="translate(${i * 320} 0)"><rect width="320" height="180" fill="hsl(${hue} 30% ${22 + i * 2}%)"/><path d="M0 120 L320 104 L320 180 L0 180Z" fill="hsl(120 28% 22%)"/><circle cx="${x}" cy="${y}" r="9" fill="#d9dde3"/><text x="300" y="20" fill="#fff" fill-opacity=".35" font-size="14" text-anchor="end">${i + 1}/8</text></g>`;
+  }).join("");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2560 180">${frames}</svg>`;
+  return `data:image/svg+xml;utf8,${encodeURIComponent(svg)}`;
+}
+
 export function createMockBackend(): Backend {
   const empty = new URLSearchParams(window.location.search).get("mock") === "empty";
   let clips = empty ? [] : makeClips(40);
@@ -334,6 +348,11 @@ export function createMockBackend(): Backend {
       if (!thumbIds.has(id)) thumbIds.set(id, thumbIds.size + 1);
       return `mock-thumb:${id}`;
     },
+    ensure_scrub_strip: async ({ id }) => {
+      await sleep(200 + Math.random() * 300);
+      if (!clips.some((c) => c.id === id) || /-(7|19)$/.test(id)) return null;
+      return `mock-strip:${id}`;
+    },
     list_games: () => games.map((g) => ({ ...g })),
     set_game_enabled: ({ id, enabled }) => {
       games = games.map((g) => (g.id === id ? { ...g, enabled } : g));
@@ -438,6 +457,13 @@ export function createMockBackend(): Backend {
       return () => set!.delete(f);
     },
     fileSrc(path: string) {
+      if (path.startsWith("mock-strip:")) {
+        const id = path.slice("mock-strip:".length);
+        return stripSvg(
+          clips.find((c) => c.id === id),
+          id.length,
+        );
+      }
       if (path.startsWith("mock-thumb:")) {
         const id = path.slice("mock-thumb:".length);
         return thumbSvg(

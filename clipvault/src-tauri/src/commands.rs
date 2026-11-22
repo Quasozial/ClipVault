@@ -99,8 +99,13 @@ pub async fn set_trim(
     trim_in: Option<f64>,
     trim_out: Option<f64>,
 ) -> Result<Clip, String> {
-    let db = core.db();
-    blocking(move || library::set_trim(&crate::locks::lock(&db), &id, trim_in, trim_out)).await
+    let (db, thumbs) = (core.db(), core.thumbs_dir());
+    blocking(move || {
+        let clip = library::set_trim(&crate::locks::lock(&db), &id, trim_in, trim_out)?;
+        library::forget_strip(&thumbs, &id);
+        Ok(clip)
+    })
+    .await
 }
 
 /// Cuts the trim range into a new `<name>__trim.mp4` and adds it as a clip.
@@ -159,10 +164,12 @@ pub async fn set_starred(core: Core<'_>, id: String, starred: bool) -> Result<Cl
 /// Recycle Bin, then the row. A file that is already gone still removes the row.
 #[tauri::command]
 pub async fn delete_clip(core: Core<'_>, id: String) -> Result<(), String> {
-    let (db, cache) = (core.db(), crate::waveform::cache_dir(&core.thumbs_dir()));
+    let (db, thumbs) = (core.db(), core.thumbs_dir());
+    let cache = crate::waveform::cache_dir(&thumbs);
     blocking(move || {
         library::delete_clip(&crate::locks::lock(&db), &id)?;
         crate::waveform::forget(&cache, &id);
+        library::forget_strip(&thumbs, &id);
         Ok(())
     })
     .await
@@ -192,6 +199,16 @@ pub async fn ensure_thumbnail(core: Core<'_>, ffmpeg: State<'_, FfmpegPath>, id:
     let Some(ff) = ffmpeg.0.clone() else { return Ok(None) };
     let key = id.clone();
     Ok(library::THUMBS.run(&key, move || library::ensure_thumbnail(&db, &ff, &thumbs, &id)).await)
+}
+
+/// Hover-scrub strip of the clip (one JPEG, frames side by side); made on
+/// first use, queued behind thumbnails. `None` without FFmpeg or on failure.
+#[tauri::command]
+pub async fn ensure_scrub_strip(core: Core<'_>, ffmpeg: State<'_, FfmpegPath>, id: String) -> Result<Option<String>, String> {
+    let (db, thumbs) = (core.db(), core.thumbs_dir());
+    let Some(ff) = ffmpeg.0.clone() else { return Ok(None) };
+    let key = format!("strip:{id}");
+    Ok(library::THUMBS.run(&key, move || library::ensure_scrub_strip(&db, &ff, &thumbs, &id)).await)
 }
 
 // ----- games -----

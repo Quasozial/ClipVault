@@ -301,6 +301,8 @@ export const api = {
   exportClip: (id: string, options: ExportOptions) => call<string>("export_clip", { id, options }),
   revealInFolder: (path: string) => call<null>("reveal_in_folder", { path }),
   ensureThumbnail: (id: string) => call<string | null>("ensure_thumbnail", { id }),
+  /** Hover-scrub strip: 8 frames side by side in one JPEG; `null` when it cannot be made. */
+  ensureScrubStrip: (id: string) => call<string | null>("ensure_scrub_strip", { id }),
   audioTracks: (id: string) => call<AudioTrack[]>("audio_tracks", { id }),
   /** Queues background AV1 compression; `clip-updated` follows when done. */
   compressClip: (id: string) => call<null>("compress_clip", { id }),

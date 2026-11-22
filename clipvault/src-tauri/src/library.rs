@@ -222,6 +222,40 @@ pub fn ensure_thumbnail(db: &Mutex<Connection>, ffmpeg: &Path, thumbs_dir: &Path
     Ok(Some(out.to_string_lossy().into_owned()))
 }
 
+/// Where a clip's hover-scrub strip is cached.
+pub fn strip_path(thumbs_dir: &Path, id: &str) -> PathBuf {
+    thumbs_dir.join(format!("{id}.strip.jpg"))
+}
+
+/// The clip's hover-scrub strip (see [`crate::thumbs::strip_args`]), made on
+/// first use and cached next to the thumbnails. `Ok(None)` when the video is
+/// missing. Shares [`THUMB_LOCK`] with thumbnails: one FFmpeg at a time.
+pub fn ensure_scrub_strip(db: &Mutex<Connection>, ffmpeg: &Path, thumbs_dir: &Path, id: &str) -> Result<Option<String>> {
+    let out = strip_path(thumbs_dir, id);
+    let clip = get_clip(&crate::locks::lock(db), id)?;
+    if !clip.path.is_file() {
+        return Ok(None);
+    }
+    if out.is_file() {
+        return Ok(Some(out.to_string_lossy().into_owned()));
+    }
+    let _guard = THUMB_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if out.is_file() {
+        return Ok(Some(out.to_string_lossy().into_owned()));
+    }
+    if let Some(d) = out.parent() {
+        std::fs::create_dir_all(d)?;
+    }
+    let (start, span) = crate::thumbs::strip_window(clip.duration_s, clip.trim_in, clip.trim_out);
+    crate::thumbs::generate_strip(ffmpeg, &clip.path, &out, start, span)?;
+    Ok(Some(out.to_string_lossy().into_owned()))
+}
+
+/// Drops a cached strip (trim changed, clip deleted). Errors are ignored.
+pub fn forget_strip(thumbs_dir: &Path, id: &str) {
+    let _ = std::fs::remove_file(strip_path(thumbs_dir, id));
+}
+
 // ----- export -----
 
 /// FFmpeg arguments (without the binary) for cutting `src` to `[trim_in, trim_out]`
@@ -656,6 +690,41 @@ mod tests {
             crate::db::clips::insert(&conn, &c).unwrap();
         }
         conn
+    }
+
+    #[test]
+    fn scrub_strip_reuses_existing_file_without_ffmpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let video = dir.path().join("a.mp4");
+        std::fs::write(&video, b"x").unwrap();
+        let mut c = clip("a", "A", "RL", &[], "2026-11-01T10:00:00+01:00");
+        c.path = video;
+        let conn = open_memory().unwrap();
+        crate::db::clips::insert(&conn, &c).unwrap();
+        let db = Mutex::new(conn);
+        let strip = strip_path(dir.path(), "a");
+        std::fs::write(&strip, b"jpg").unwrap();
+        let got = ensure_scrub_strip(&db, &dir.path().join("no-ffmpeg.exe"), dir.path(), "a").unwrap();
+        assert_eq!(got.as_deref(), Some(strip.to_string_lossy().as_ref()));
+    }
+
+    #[test]
+    fn scrub_strip_none_when_video_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = open_memory().unwrap();
+        crate::db::clips::insert(&conn, &clip("a", "A", "RL", &[], "2026-11-01T10:00:00+01:00")).unwrap();
+        let db = Mutex::new(conn);
+        assert_eq!(ensure_scrub_strip(&db, &dir.path().join("no-ffmpeg.exe"), dir.path(), "a").unwrap(), None);
+    }
+
+    #[test]
+    fn forget_strip_removes_file_and_ignores_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let strip = strip_path(dir.path(), "a");
+        std::fs::write(&strip, b"jpg").unwrap();
+        forget_strip(dir.path(), "a");
+        assert!(!strip.exists());
+        forget_strip(dir.path(), "a");
     }
 
     fn ids(v: &[Clip]) -> Vec<&str> {

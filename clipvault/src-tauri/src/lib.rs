@@ -313,6 +313,7 @@ pub fn run() {
             commands::export_clip,
             commands::reveal_in_folder,
             commands::ensure_thumbnail,
+            commands::ensure_scrub_strip,
             commands::audio_tracks,
             commands::list_games,
             commands::set_game_enabled,
