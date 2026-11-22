@@ -9,12 +9,14 @@ import {
   type Game,
   type HotkeyAction,
   type HotkeyError,
+  type MovePreview,
   type RlStatsInfo,
   type RunningProcess,
   type Settings as SettingsT,
 } from "../api";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { MicMeter } from "../components/MicMeter";
+import { MoveClipsDialog } from "../components/MoveClipsDialog";
 import { ConfirmDialog, Toggle } from "../components/ui";
 import { settingsOpenSync } from "../lib/settingsOpen";
 import { rebaseSettings } from "../lib/settingsMerge";
@@ -344,6 +346,8 @@ export function Settings({ section }: { section?: string }) {
   const [hotkeyErrors, setHotkeyErrors] = useState<HotkeyError[]>([]);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /** Offer to move the clips left in the old clip folder after it changed. */
+  const [move, setMove] = useState<{ from: string; to: string; preview: MovePreview } | null>(null);
   const draftRef = useRef(draft);
   draftRef.current = draft;
   const savedRef = useRef(saved);
@@ -469,6 +473,13 @@ export function Settings({ section }: { section?: string }) {
       setDraft(rebaseSettings(draftRef.current ?? draft, draft, after));
       setSaveError(null);
       toast.info(errs.length ? "Settings saved, but some hotkeys could not be registered" : "Settings saved");
+      const [from, to] = [saved.capture_dir, after.capture_dir];
+      if (from.trim().toLowerCase() !== to.trim().toLowerCase()) {
+        api.moveClipsPreview(from).then(
+          (preview) => preview.count > 0 && setMove({ from, to, preview }),
+          (e) => reportError("Could not check the old clip folder", e),
+        );
+      }
     } catch (e) {
       setSaveError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -486,6 +497,7 @@ export function Settings({ section }: { section?: string }) {
 
   return (
     <div className="settings" ref={scroller}>
+      {move && <MoveClipsDialog {...move} onClose={() => setMove(null)} />}
       <nav className="s-nav" aria-label="Settings sections">
         {SECTIONS.map(([id, label]) => (
           <a
@@ -593,7 +605,7 @@ export function Settings({ section }: { section?: string }) {
           <Row label="Desktop capture" hint="Record the desktop when no game is running. Also on the hotkey and the tray menu.">
             <Toggle checked={draft.desktop_capture} onChange={(v) => set("desktop_capture", v)} label={draft.desktop_capture ? "On" : "Off"} />
           </Row>
-          <Row label="Clip folder" hint="Saved clips go here." htmlFor="cdir">
+          <Row label="Clip folder" hint="Saved clips go here. After a change, ClipVault offers to move your clips from the old folder." htmlFor="cdir">
             <input id="cdir" className="path-input" value={draft.capture_dir} onChange={(e) => set("capture_dir", e.target.value)} spellCheck={false} />
           </Row>
           <Row

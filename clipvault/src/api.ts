@@ -211,6 +211,30 @@ export interface ImportProgress {
   total: number;
 }
 
+/** Library clips stored directly in a folder (moving the clip folder). */
+export interface MovePreview {
+  count: number;
+  bytes: number;
+}
+
+export interface MoveProgress {
+  done: number;
+  total: number;
+  bytes_done: number;
+  bytes_total: number;
+}
+
+export interface MoveReport {
+  moved: number;
+  /** Held by background compression; move again later. */
+  skipped_busy: number;
+  /** `"<file>: <reason>"` for clips that stayed where they were. */
+  failed: string[];
+  /** Moved, but the original file could not be deleted from the old folder. */
+  originals_kept: string[];
+  cancelled: boolean;
+}
+
 /** Where a clip is in background compression. */
 export type CompressStage = "queued" | "encoding" | "swapping";
 
@@ -223,6 +247,9 @@ export interface EventMap {
   "compress-status": { id: string; stage: CompressStage | null };
   "mic-level": { dbfs: number };
   "import-progress": ImportProgress;
+  "move-progress": MoveProgress;
+  /** Clips moved to another folder: lists reload their paths. */
+  "clips-moved": null;
   /** Main window hidden to the tray (close button) or shown again from the tray. */
   "window-visibility": { visible: boolean };
   /** Stored settings changed (any source: this page, tray / hotkey desktop toggle, Moments import). */
@@ -327,6 +354,12 @@ export const api = {
   listDisplays: () => call<DisplayInfo[]>("list_displays"),
   listEncoders: () => call<EncoderList>("list_encoders"),
   listAudioDevices: () => call<AudioDevice[]>("list_audio_devices"),
+  /** Library clips stored directly in `from`. */
+  moveClipsPreview: (from: string) => call<MovePreview>("move_clips_preview", { from }),
+  /** Moves them to `to` (files and library paths); `move-progress` while running. */
+  moveClips: (from: string, to: string) => call<MoveReport>("move_clips", { from, to }),
+  /** Stops a running move after the current file. */
+  cancelMoveClips: () => call<null>("cancel_move_clips"),
 
   // Rocket League
   rlStatsStatus: () => call<RlStatsInfo>("rl_stats_status"),

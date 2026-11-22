@@ -306,6 +306,18 @@ pub fn set_thumbnail(conn: &Connection, id: &str, path: Option<&std::path::Path>
     Ok(())
 }
 
+/// Points the clip at its file's new location (after a folder move).
+pub fn set_path(conn: &Connection, id: &str, path: &std::path::Path) -> Result<()> {
+    let n = conn.execute(
+        "UPDATE clips SET path = ?2, updated_at = ?3 WHERE id = ?1",
+        params![id, path.to_string_lossy(), Utc::now().to_rfc3339()],
+    )?;
+    if n == 0 {
+        return Err(anyhow!("clip {id} not found"));
+    }
+    Ok(())
+}
+
 pub fn set_starred(conn: &Connection, id: &str, starred: bool) -> Result<()> {
     let n = conn.execute(
         "UPDATE clips SET starred = ?2, updated_at = ?3 WHERE id = ?1",

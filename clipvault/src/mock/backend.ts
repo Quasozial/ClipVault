@@ -187,6 +187,7 @@ export function createMockBackend(): Backend {
   };
   let health: Health = { state: "idle", reason: null, target: null };
   let settingsOpen = false;
+  let moveCancel = false;
   const thumbIds = new Map<string, number>();
 
   const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -438,6 +439,31 @@ export function createMockBackend(): Backend {
       { id: "\\\\.\\DISPLAY1", output_idx: 0, width: 2560, height: 1440, refresh_hz: 165, primary: true, hdr: true },
       { id: "\\\\.\\DISPLAY2", output_idx: 1, width: 1920, height: 1080, refresh_hz: 60, primary: false, hdr: false },
     ],
+    move_clips_preview: ({ from }) => {
+      const inDir = clips.filter((c) => c.path.slice(0, c.path.lastIndexOf("\\")).toLowerCase() === String(from).toLowerCase());
+      return { count: inDir.length, bytes: inDir.reduce((a, c) => a + c.size, 0) };
+    },
+    move_clips: async ({ from, to }) => {
+      moveCancel = false;
+      const inDir = clips.filter((c) => c.path.slice(0, c.path.lastIndexOf("\\")).toLowerCase() === String(from).toLowerCase());
+      const bytes_total = inDir.reduce((a, c) => a + c.size, 0);
+      let bytes_done = 0;
+      let done = 0;
+      emit("move-progress", { done, total: inDir.length, bytes_done, bytes_total });
+      for (const c of inDir) {
+        if (moveCancel) break;
+        await sleep(150);
+        c.path = `${to}\\${c.path.slice(c.path.lastIndexOf("\\") + 1)}`;
+        bytes_done += c.size;
+        emit("move-progress", { done: ++done, total: inDir.length, bytes_done, bytes_total });
+      }
+      emit("clips-moved", null);
+      return { moved: done, skipped_busy: 0, failed: [], originals_kept: [], cancelled: moveCancel };
+    },
+    cancel_move_clips: () => {
+      moveCancel = true;
+      return null;
+    },
     list_audio_devices: (): AudioDevice[] => [
       { id: "out-1", name: "Speakers (Realtek Audio)", is_input: false, is_default: true },
       { id: "out-2", name: "Headset (Arctis Nova 7)", is_input: false, is_default: false },

@@ -287,6 +287,49 @@ pub async fn save_settings(app: AppHandle, core: Core<'_>, settings: Settings) -
     rx.await.map_err(|_| "could not register hotkeys".to_string())
 }
 
+// ----- moving clips to another folder -----
+
+/// How many library clips are stored directly in `from`, and their size.
+#[tauri::command]
+pub async fn move_clips_preview(core: Core<'_>, from: String) -> Result<crate::relocate::MovePreview, String> {
+    let db = core.db();
+    blocking(move || crate::relocate::preview(&crate::locks::lock(&db), Path::new(&from))).await
+}
+
+/// Moves the library clips in `from` to `to` (see `relocate.rs`), emitting
+/// `move-progress`, then `clips-moved` so open lists reload.
+#[tauri::command]
+pub async fn move_clips(app: AppHandle, core: Core<'_>, from: String, to: String) -> Result<crate::relocate::MoveReport, String> {
+    use tauri::Emitter;
+    let running = crate::relocate::begin().ok_or("Clips are already being moved")?;
+    let core: Arc<AppCore> = core.inner().clone();
+    blocking(move || {
+        let _running = running;
+        let (db, comp) = (core.db(), core.compressor());
+        let a = app.clone();
+        let report = crate::relocate::move_clips(
+            &db,
+            Path::new(&from),
+            Path::new(&to),
+            &|id| comp.stage(id).is_some(),
+            &|p| crate::disk::free_bytes(p).ok(),
+            &mut |p| {
+                let _ = a.emit("move-progress", p);
+            },
+        );
+        refresh_asset_scope(&app, &core);
+        let _ = app.emit("clips-moved", ());
+        report
+    })
+    .await
+}
+
+/// Stops a running move after the current file.
+#[tauri::command]
+pub fn cancel_move_clips() {
+    crate::relocate::cancel();
+}
+
 /// One encoder choice for the Settings page.
 #[derive(serde::Serialize)]
 pub struct EncoderOption {

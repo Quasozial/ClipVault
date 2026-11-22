@@ -282,15 +282,16 @@ pub fn run_watched(
     crate::ffmpeg_proc::run(program, args, timeout, crate::ffmpeg_proc::Priority::Idle, busy, on_spawn)
 }
 
-/// Removes leftovers of interrupted saves (`*.mp4.tmp`) and compressions
-/// (`*.mp4.compress.tmp`) directly in `dir`; returns how many. Call before
+/// Removes leftovers of interrupted saves (`*.mp4.tmp`), compressions
+/// (`*.mp4.compress.tmp`) and folder moves (`*.mp4.moving`) directly in
+/// `dir`; returns how many. Call before
 /// any save or compression can run.
 pub fn clean_stale_temps(dir: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(dir) else { return 0 };
     let mut removed = 0;
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_lowercase();
-        let stale = name.ends_with(".mp4.tmp") || name.ends_with(".mp4.compress.tmp");
+        let stale = name.ends_with(".mp4.tmp") || name.ends_with(".mp4.compress.tmp") || name.ends_with(crate::relocate::PARTIAL_SUFFIX);
         if stale && e.file_type().is_ok_and(|t| t.is_file()) {
             match std::fs::remove_file(e.path()) {
                 Ok(()) => {

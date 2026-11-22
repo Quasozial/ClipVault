@@ -138,6 +138,8 @@ export function Library() {
   }, []);
 
   useEffect(load, [load, imp.generation]);
+  // Clips moved to another folder: their paths changed.
+  useEffect(() => on("clips-moved", () => void load()), [load]);
 
   // Background compression changed a clip's size.
   useEffect(

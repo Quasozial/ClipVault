@@ -16,6 +16,7 @@ pub mod locks;
 pub mod logging;
 pub mod notify;
 pub mod overlay;
+pub mod relocate;
 pub mod rescan;
 pub mod rl_stats;
 pub mod save;
@@ -327,6 +328,9 @@ pub fn run() {
             commands::list_encoders,
             commands::compress_clip,
             commands::compress_status,
+            commands::move_clips_preview,
+            commands::move_clips,
+            commands::cancel_move_clips,
             commands::list_audio_devices,
             commands::rl_stats_status,
             commands::rl_enable_stats
