@@ -43,6 +43,14 @@ impl Encoder {
         Encoder::X264,
     ];
 
+    /// Whether recording can use it. The replay buffer is MPEG-TS segments and
+    /// FFmpeg's MPEG-TS muxer writes AV1 as an unknown data stream: the clip
+    /// would have no video (black, no thumbnail, failing concat). AV1 stays
+    /// in [`Self::PREFERENCE`] for background compression, which writes MP4.
+    pub fn can_record(self) -> bool {
+        !matches!(self, Encoder::Av1Nvenc | Encoder::Av1Amf | Encoder::Av1Qsv)
+    }
+
     /// FFmpeg encoder name (`Auto` has none).
     pub fn ffmpeg_name(self) -> Option<&'static str> {
         Some(match self {

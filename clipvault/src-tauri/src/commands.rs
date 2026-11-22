@@ -308,7 +308,7 @@ pub fn list_encoders(core: Core<'_>) -> EncoderList {
     let avail = core.available_encoders();
     let opt = |e: crate::settings::Encoder| EncoderOption { id: e, label: e.label(), hardware: e.is_hardware() };
     let (auto, _) = crate::capture::encoders::resolve(crate::settings::Encoder::Auto, &avail);
-    EncoderList { available: avail.iter().map(|&e| opt(e)).collect(), auto: opt(auto) }
+    EncoderList { available: avail.iter().filter(|e| e.can_record()).map(|&e| opt(e)).collect(), auto: opt(auto) }
 }
 
 /// Queues the clip for background AV1 compression; `clip-updated` follows.

@@ -93,14 +93,16 @@ pub fn probe_all(ffmpeg: &Path) -> Vec<Encoder> {
 /// What recording uses for the `wanted` setting, and a notice for the user when
 /// it is not what they picked. `available` is [`probe_all`]'s result; when it
 /// is empty (probing impossible) a fixed choice is trusted as it is.
+/// Encoders the buffer cannot hold ([`Encoder::can_record`]) are never picked.
 pub fn resolve(wanted: Encoder, available: &[Encoder]) -> (Encoder, Option<String>) {
-    if available.is_empty() {
+    let recordable: Vec<Encoder> = available.iter().copied().filter(|e| e.can_record()).collect();
+    if available.is_empty() && wanted.can_record() {
         return (if wanted == Encoder::Auto { Encoder::X264 } else { wanted }, None);
     }
-    if wanted != Encoder::Auto && available.contains(&wanted) {
+    if wanted != Encoder::Auto && recordable.contains(&wanted) {
         return (wanted, None);
     }
-    let best = best_of(available);
+    let best = best_of(&recordable);
     let notice = if wanted != Encoder::Auto {
         Some(format!("{} is not available on this PC – recording with {}", wanted.label(), best.label()))
     } else {
@@ -125,7 +127,8 @@ mod tests {
 
     #[test]
     fn auto_picks_best_available() {
-        assert_eq!(resolve(Auto, &[H264Nvenc, HevcNvenc, Av1Nvenc, X264]), (Av1Nvenc, None));
+        // AV1 cannot go into the MPEG-TS buffer: HEVC even on an AV1 card.
+        assert_eq!(resolve(Auto, &[H264Nvenc, HevcNvenc, Av1Nvenc, X264]), (HevcNvenc, None));
         // Older NVIDIA card (no AV1): HEVC.
         assert_eq!(resolve(Auto, &[HevcNvenc, H264Nvenc, X264]), (HevcNvenc, None));
         // AMD before RX 7000.
@@ -146,6 +149,14 @@ mod tests {
         let (e, n) = resolve(H264Nvenc, &[HevcAmf, H264Amf, X264]);
         assert_eq!(e, HevcAmf);
         assert_eq!(n.as_deref(), Some("NVIDIA H.264 is not available on this PC – recording with AMD HEVC"));
+    }
+
+    #[test]
+    fn av1_is_never_used_for_recording() {
+        let (e, n) = resolve(Av1Nvenc, &[Av1Nvenc, HevcNvenc, X264]);
+        assert_eq!(e, HevcNvenc);
+        assert_eq!(n.as_deref(), Some("NVIDIA AV1 is not available on this PC – recording with NVIDIA HEVC"));
+        assert_eq!(resolve(Av1Qsv, &[]).0, X264);
     }
 
     #[test]
