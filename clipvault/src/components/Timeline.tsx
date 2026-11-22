@@ -319,6 +319,7 @@ export function Timeline({
                   type="button"
                   className={`tl-marker mk-${m.kind}`}
                   style={{ left: `${xs[i].x}%` }}
+                  data-edge={xs[i].x < 8 ? "start" : xs[i].x > 92 ? "end" : undefined}
                   onPointerDown={(e) => e.stopPropagation()}
                   onClick={() => onSeek(m.t_s)}
                   aria-label={tip}

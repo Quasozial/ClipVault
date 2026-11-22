@@ -220,7 +220,7 @@ function RocketLeagueSection() {
         </div>
         <div>
           <dt>Connection</dt>
-          <dd>{info ? (info.listener_connected ? "Connected to Rocket League" : "Not connected (game not running?)") : "–"}</dd>
+          <dd>{info ? (info.listener_connected ? "Connected to Rocket League" : "Not connected. Is Rocket League running?") : "–"}</dd>
         </div>
         <div>
           <dt>Port</dt>
@@ -236,7 +236,7 @@ function RocketLeagueSection() {
       {note && <p className="notice">{note}</p>}
       <div className="row-actions">
         {info?.status === "disabled" && (
-          <button type="button" className="btn btn-primary" onClick={() => setConfirm(true)}>
+          <button type="button" className="btn" onClick={() => setConfirm(true)}>
             Enable Stats API
           </button>
         )}
@@ -288,7 +288,7 @@ function ImportSection({ onImported }: { onImported(): void }) {
       intro="Adds your Moments clips with their titles, tags, trims and markers. The files stay where they are. Running it again only adds clips that are new since last time."
     >
       <div className="row-actions">
-        <button type="button" className="btn btn-primary" disabled={imp.running || available === false} onClick={() => void startImport()}>
+        <button type="button" className="btn" disabled={imp.running || available === false} onClick={() => void startImport()}>
           {imp.running ? "Importing…" : "Import from Moments"}
         </button>
         {available === false && <span className="hint">No Moments library was found on this PC.</span>}

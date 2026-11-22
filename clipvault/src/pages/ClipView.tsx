@@ -799,7 +799,7 @@ export function ClipView({ id }: { id: string }) {
               <small>Re-encodes the cut. Slower; without it the cut snaps to the nearest keyframe.</small>
             </span>
           </label>
-          <button type="button" className="btn btn-primary btn-wide" disabled={!hasTrim || exporting} onClick={() => void doExport()}>
+          <button type="button" className="btn btn-wide" disabled={!hasTrim || exporting} onClick={() => void doExport()}>
             {exporting ? "Exporting…" : "Export trimmed clip"}
           </button>
           {!hasTrim && <p className="hint">Set a trim range first.</p>}

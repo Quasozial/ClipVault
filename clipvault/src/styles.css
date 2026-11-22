@@ -22,16 +22,18 @@
   --mk-manual: #8fb1e6;
   --mk-imported: #9a92c9;
 
-  --r-s: 4px;
-  --r-m: 7px;
+  --r-s: 6px;
+  --r-m: 8px;
+  --r-l: 12px;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
   --font: "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
   --font-display: "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
   --mono: "Cascadia Mono", Consolas, monospace;
 
   color-scheme: dark;
   font-family: var(--font);
-  font-size: 13.5px;
-  line-height: 1.45;
+  font-size: 14px;
+  line-height: 20px;
   color: var(--text);
   background: var(--bg);
   font-synthesis: none;
@@ -70,7 +72,7 @@ textarea {
 }
 kbd {
   font-family: var(--font);
-  font-size: 11.5px;
+  font-size: 11px;
   padding: 1px 6px;
   border: 1px solid var(--line);
   border-bottom-width: 2px;
@@ -105,7 +107,7 @@ code {
   align-items: center;
   gap: 8px;
   font-family: var(--font-display);
-  font-weight: 650;
+  font-weight: 600;
   font-size: 15px;
   letter-spacing: -0.01em;
   text-decoration: none;
@@ -121,6 +123,7 @@ code {
   padding: 0 12px;
   color: var(--muted);
   text-decoration: none;
+  transition: color 0.12s var(--ease), border-color 0.12s var(--ease);
   border-bottom: 2px solid transparent;
   margin-bottom: -1px;
 }
@@ -137,7 +140,7 @@ code {
   color: var(--muted);
   border: 1px dashed var(--line);
   border-radius: var(--r-s);
-  padding: 1px 8px;
+  padding: 2px 8px;
 }
 .health {
   margin-left: auto;
@@ -198,13 +201,17 @@ code {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: 30px;
+  height: 32px;
   padding: 0 12px;
   border: 1px solid var(--line);
   border-radius: var(--r-s);
   background: var(--raise);
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 0.12s var(--ease), border-color 0.12s var(--ease), color 0.12s var(--ease), transform 0.08s var(--ease);
+}
+.btn:active:not(:disabled) {
+  transform: scale(0.98);
 }
 .btn:hover:not(:disabled) {
   border-color: #46505c;
@@ -218,7 +225,7 @@ code {
   background: var(--accent);
   border-color: var(--accent);
   color: var(--accent-ink);
-  font-weight: 600;
+  font-weight: 500;
 }
 .btn-primary:hover:not(:disabled) {
   background: #f5b452;
@@ -237,7 +244,7 @@ code {
   background: var(--rec);
   border-color: var(--rec);
   color: #fff;
-  font-weight: 600;
+  font-weight: 500;
 }
 .btn-danger:hover:not(:disabled) {
   background: #ee665e;
@@ -253,27 +260,35 @@ code {
   background: rgba(229, 83, 75, 0.1);
 }
 .btn-small {
-  height: 26px;
-  padding: 0 9px;
-  font-size: 12.5px;
+  height: 28px;
+  padding: 0 10px;
+  font-size: 13px;
 }
 .btn-wide {
   width: 100%;
 }
 .btn-icon {
-  width: 34px;
+  width: 32px;
   padding: 0;
+}
+.btn-primary:disabled,
+.btn-danger:disabled {
+  opacity: 1;
+  background: var(--raise);
+  border-color: var(--line);
+  color: var(--faint);
 }
 .icon-btn {
   display: inline-grid;
   place-items: center;
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   border: 0;
   background: transparent;
   color: var(--muted);
   border-radius: var(--r-s);
   cursor: pointer;
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
 }
 .icon-btn:hover {
   color: var(--text);
@@ -286,8 +301,8 @@ input[type="number"],
 input:not([type]),
 select,
 textarea {
-  height: 30px;
-  padding: 0 9px;
+  height: 32px;
+  padding: 0 10px;
   border: 1px solid var(--line);
   border-radius: var(--r-s);
   background: var(--surface);
@@ -295,10 +310,10 @@ textarea {
 }
 textarea {
   height: auto;
-  padding: 7px 9px;
+  padding: 6px 10px;
   resize: vertical;
   min-height: 64px;
-  line-height: 1.45;
+  line-height: 20px;
 }
 input:focus,
 select:focus,
@@ -306,11 +321,11 @@ textarea:focus {
   border-color: var(--accent);
 }
 select {
-  padding-right: 26px;
+  padding-right: 28px;
   appearance: none;
   background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='6'><path d='M1 1l4 4 4-4' stroke='%238a929e' stroke-width='1.5' fill='none'/></svg>");
   background-repeat: no-repeat;
-  background-position: right 9px center;
+  background-position: right 10px center;
   cursor: pointer;
 }
 select:disabled {
@@ -321,12 +336,13 @@ option {
 }
 .field-error {
   color: #f08a84;
-  font-size: 12.5px;
+  font-size: 12px;
   margin: 4px 0 0;
 }
 .hint {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 12px;
+  line-height: 16px;
   margin: 6px 0 0;
 }
 .badge {
@@ -334,12 +350,12 @@ option {
   align-items: center;
   height: 20px;
   padding: 0 6px;
-  border-radius: var(--r-s);
-  border: 1px solid var(--accent);
-  color: var(--accent);
+  border-radius: 4px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: 0.04em;
+  font-weight: 500;
 }
 
 /* The real checkbox sits invisibly over the track, inside the toggle. It must
@@ -371,7 +387,7 @@ option {
   border-radius: 9px;
   background: var(--line);
   position: relative;
-  transition: background 0.15s;
+  transition: background-color 0.15s var(--ease);
 }
 .toggle-knob {
   position: absolute;
@@ -381,7 +397,7 @@ option {
   height: 14px;
   border-radius: 50%;
   background: var(--text);
-  transition: transform 0.15s;
+  transition: transform 0.15s var(--ease);
 }
 .toggle input:checked + .toggle-track {
   background: var(--accent);
@@ -411,8 +427,11 @@ option {
   display: flex;
   gap: 8px;
   align-items: flex-start;
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   cursor: pointer;
+}
+.check:last-child {
+  margin-bottom: 0;
 }
 .check input {
   margin: 3px 0 0;
@@ -462,28 +481,35 @@ option {
   align-items: flex-start;
   gap: 10px;
   padding: 10px 10px 10px 14px;
-  border-radius: var(--r-m);
+  border-radius: var(--r-l);
   background: var(--raise);
   border: 1px solid var(--line);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
   word-break: break-word;
 }
+.toast::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  margin-top: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+.toast-error::before {
+  background: var(--rec);
+}
 .toast span {
   flex: 1;
-}
-.toast-error {
-  border-left: 3px solid var(--rec);
-}
-.toast-info {
-  border-left: 3px solid var(--accent);
+  padding-top: 2px;
 }
 
 .dialog {
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--r-l);
   background: var(--surface);
   color: var(--text);
-  padding: 20px 22px 18px;
+  padding: 20px 24px;
   width: min(460px, calc(100vw - 40px));
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
 }
@@ -494,7 +520,7 @@ option {
   background: rgba(10, 12, 15, 0.6);
 }
 .dialog h2 {
-  margin: 0 0 10px;
+  margin: 0 0 12px;
   font-family: var(--font-display);
   font-size: 17px;
   font-weight: 600;
@@ -507,7 +533,7 @@ option {
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 16px;
+  margin-top: 20px;
 }
 
 /* ----- library ----- */
@@ -520,8 +546,8 @@ option {
 .toolbar {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 14px 24px 12px;
+  gap: 8px;
+  padding: 16px 24px 4px;
 }
 .search {
   position: relative;
@@ -537,12 +563,12 @@ option {
 }
 .search input {
   width: 100%;
-  padding-left: 31px;
-  padding-right: 30px;
+  padding-left: 32px;
+  padding-right: 32px;
 }
 .search-key {
   position: absolute;
-  right: 7px;
+  right: 8px;
   color: var(--muted);
   pointer-events: none;
 }
@@ -552,6 +578,7 @@ option {
 .count {
   margin-left: auto;
   color: var(--muted);
+  font-size: 13px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -559,11 +586,10 @@ option {
   display: flex;
   align-items: center;
   gap: 24px;
-  margin: 0 24px 6px;
-  padding: 14px 16px;
+  margin: 12px 24px 0;
+  padding: 16px;
   border: 1px solid var(--line);
-  border-left: 3px solid var(--accent);
-  border-radius: var(--r-m);
+  border-radius: var(--r-l);
   background: var(--surface);
 }
 .banner-text {
@@ -599,7 +625,7 @@ option {
   min-width: 0;
   text-decoration: none;
   border-radius: var(--r-m);
-  outline-offset: 3px;
+  outline-offset: 4px;
 }
 .card-media {
   position: relative;
@@ -607,6 +633,7 @@ option {
   border-radius: var(--r-m);
   overflow: hidden;
   background: var(--surface);
+  transition: box-shadow 0.15s var(--ease);
 }
 .thumb {
   width: 100%;
@@ -622,22 +649,23 @@ option {
   display: grid;
   place-items: center;
   color: var(--faint);
-  background: repeating-linear-gradient(135deg, var(--surface) 0 10px, #252930 10px 20px);
+  background: var(--surface);
 }
 .card:hover .card-media {
-  box-shadow: 0 0 0 2px var(--line);
+  box-shadow: 0 0 0 1px #46505c;
 }
 .card:hover .card-title {
   color: #fff;
 }
 .card-dur {
   position: absolute;
-  right: 6px;
-  bottom: 6px;
+  right: 8px;
+  bottom: 8px;
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 1px 6px;
+  height: 20px;
+  padding: 0 6px;
   border-radius: var(--r-s);
   background: rgba(12, 14, 17, 0.78);
   font-size: 12px;
@@ -645,11 +673,13 @@ option {
 }
 .card-markers {
   position: absolute;
-  left: 6px;
-  bottom: 6px;
+  left: 8px;
+  bottom: 8px;
   display: flex;
-  gap: 2px;
-  padding: 2px 4px;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 4px;
   border-radius: var(--r-s);
   background: rgba(12, 14, 17, 0.78);
 }
@@ -658,7 +688,7 @@ option {
   align-items: center;
   gap: 2px;
   padding: 0 2px;
-  font-size: 11.5px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 .card-mk b {
@@ -666,11 +696,12 @@ option {
   color: var(--text);
 }
 .card-info {
-  padding: 9px 2px 0;
+  padding: 10px 0 0;
 }
 .card-title {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.12s var(--ease);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -681,6 +712,7 @@ option {
   gap: 8px;
   color: var(--muted);
   font-size: 13px;
+  line-height: 20px;
   font-variant-numeric: tabular-nums;
 }
 .card-game {
@@ -716,13 +748,15 @@ option {
   gap: 4px;
   min-height: 60%;
   padding: 40px 24px;
+  max-width: 60ch;
+  margin: 0 auto;
   text-align: center;
 }
 .empty p {
   margin: 0;
 }
 .empty .btn {
-  margin-top: 10px;
+  margin-top: 12px;
 }
 
 /* ----- clip view ----- */
@@ -733,7 +767,7 @@ option {
   grid-template-rows: minmax(0, 1fr);
   gap: 24px;
   height: 100%;
-  padding: 14px 24px 18px;
+  padding: 16px 24px;
   overflow: hidden;
 }
 .clipview-empty {
@@ -746,6 +780,11 @@ option {
   display: flex;
   flex-direction: column;
   overflow-y: auto;
+  /* Room for trim handles and marker tips at the timeline's ends without a
+   * sideways scrollbar: padding inside the scroller, cancelled outside. */
+  overflow-x: hidden;
+  padding: 0 12px;
+  margin: 0 -12px;
 }
 .clip-main > :not(.player) {
   flex: none;
@@ -754,7 +793,7 @@ option {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
 }
 .back {
   display: inline-flex;
@@ -765,6 +804,7 @@ option {
   text-decoration: none;
   padding: 4px 8px 4px 4px;
   border-radius: var(--r-s);
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
 }
 .back:hover {
   color: var(--text);
@@ -821,9 +861,9 @@ option {
 .transport {
   display: flex;
   align-items: center;
-  gap: 14px;
-  margin-top: 10px;
-  min-height: 34px;
+  gap: 12px;
+  margin-top: 12px;
+  min-height: 32px;
 }
 .clock,
 .trim-info {
@@ -843,7 +883,7 @@ option {
   gap: 6px;
 }
 .keys {
-  margin: 8px 0 0;
+  margin: 12px 0 0;
   font-size: 12px;
   display: flex;
   flex-wrap: wrap;
@@ -859,14 +899,15 @@ option {
 
 /* timeline: labels column + lanes (video row, one row per audio track) */
 .timeline {
-  --tk-game: #3fbfa8;
-  --tk-mic: #e8964a;
+  /* Track hues stay clear of the amber accent, which marks the trim. */
+  --tk-game: #4db6a4;
+  --tk-mic: #e0899c;
   --tk-voice: #8fb1e6;
-  --tk-other: #a79fd6;
+  --tk-other: #a3abb6;
   display: grid;
   grid-template-columns: 172px minmax(0, 1fr);
-  gap: 0 10px;
-  margin-top: 10px;
+  gap: 0 12px;
+  margin-top: 12px;
   user-select: none;
 }
 .tl-labels,
@@ -884,10 +925,10 @@ option {
   flex-direction: column;
   justify-content: center;
   gap: 4px;
-  padding: 0 10px;
+  padding: 0 12px;
   border-radius: var(--r-s);
   background: var(--surface);
-  font-size: 12.5px;
+  font-size: 12px;
   min-width: 0;
 }
 .tl-label-name {
@@ -1086,6 +1127,15 @@ option {
   opacity: 0;
   transition: opacity 0.1s;
 }
+.tl-marker[data-edge="start"]::after {
+  left: 0;
+  transform: none;
+}
+.tl-marker[data-edge="end"]::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
 .tl-marker:hover::after,
 .tl-marker:focus-visible::after {
   opacity: 1;
@@ -1184,8 +1234,8 @@ option {
   border-radius: var(--r-s);
   background: var(--accent);
   color: var(--accent-ink);
-  font-size: 11.5px;
-  font-weight: 600;
+  font-size: 11px;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
@@ -1194,8 +1244,8 @@ option {
 .clip-side {
   display: flex;
   flex-direction: column;
-  gap: 18px;
-  padding-top: 46px;
+  gap: 20px;
+  padding-top: 48px;
   min-width: 0;
   min-height: 0;
   overflow-y: auto;
@@ -1203,7 +1253,7 @@ option {
 .facts {
   display: grid;
   grid-template-columns: auto 1fr;
-  gap: 6px 14px;
+  gap: 6px 16px;
   margin: 0;
 }
 .facts > div {
@@ -1223,14 +1273,15 @@ option {
 }
 .field-label {
   color: var(--muted);
-  font-size: 12.5px;
+  font-size: 12px;
+  line-height: 16px;
 }
 .tags {
   display: flex;
   flex-wrap: wrap;
-  gap: 5px;
-  padding: 5px;
-  min-height: 34px;
+  gap: 4px;
+  padding: 4px;
+  min-height: 32px;
   border: 1px solid var(--line);
   border-radius: var(--r-s);
   background: var(--surface);
@@ -1250,13 +1301,13 @@ option {
 .chip {
   display: inline-flex;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   height: 22px;
-  padding: 0 3px 0 8px;
+  padding: 0 4px 0 8px;
   border-radius: 11px;
   background: var(--raise);
   border: 1px solid var(--line);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 .chip button {
   display: grid;
@@ -1278,9 +1329,14 @@ option {
   padding-top: 16px;
   border-top: 1px solid var(--line-soft);
 }
+.side-block > .hint + .field,
+.side-block > .field + .btn,
+.side-block > .check + .btn {
+  margin-top: 16px;
+}
 .side-block h3 {
-  margin: 0 0 10px;
-  font-size: 13.5px;
+  margin: 0 0 12px;
+  font-size: 14px;
   font-weight: 600;
 }
 .side-path {
@@ -1314,14 +1370,18 @@ option {
   align-self: start;
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  padding: 20px 12px 20px 20px;
+  gap: 2px;
+  padding: 24px 12px 24px 24px;
 }
 .s-nav a {
-  padding: 5px 10px;
+  display: flex;
+  align-items: center;
+  height: 32px;
+  padding: 0 12px;
   border-radius: var(--r-s);
   color: var(--muted);
   text-decoration: none;
+  transition: background-color 0.12s var(--ease), color 0.12s var(--ease);
 }
 .s-nav a:hover {
   color: var(--text);
@@ -1329,15 +1389,15 @@ option {
 }
 .s-nav a[aria-current="location"] {
   color: var(--text);
-  background: var(--surface);
-  box-shadow: inset 2px 0 0 var(--accent);
+  background: var(--raise);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
 }
 .s-body {
-  max-width: 820px;
-  padding: 8px 28px 120px 12px;
+  max-width: 840px;
+  padding: 8px 32px 120px 16px;
 }
 .s-section {
-  padding: 18px 0 22px;
+  padding: 24px 0;
   border-bottom: 1px solid var(--line-soft);
 }
 .s-section h2 {
@@ -1361,19 +1421,19 @@ option {
 .s-row {
   display: grid;
   grid-template-columns: minmax(170px, 260px) minmax(0, 1fr);
-  gap: 20px;
-  padding: 9px 0;
+  gap: 24px;
+  padding: 8px 0;
   align-items: start;
 }
 .s-label {
   display: flex;
   flex-direction: column;
-  padding-top: 5px;
+  padding-top: 6px;
 }
 .s-label small {
   color: var(--muted);
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 16px;
   margin-top: 2px;
 }
 .s-control {
@@ -1384,14 +1444,14 @@ option {
   padding-top: 0;
 }
 .s-control > .toggle {
-  margin-top: 5px;
+  margin-top: 6px;
 }
 .s-control select {
   max-width: 100%;
-  min-width: 220px;
+  min-width: 240px;
 }
 .s-control .value {
-  padding-top: 5px;
+  padding-top: 6px;
   display: inline-flex;
   gap: 8px;
   align-items: center;
@@ -1403,7 +1463,7 @@ option {
   color: var(--muted);
 }
 .with-unit input {
-  width: 92px;
+  width: 96px;
   font-variant-numeric: tabular-nums;
 }
 .inline {
@@ -1427,7 +1487,6 @@ option {
 .notice {
   margin: 0 0 4px;
   padding: 8px 12px;
-  border-left: 3px solid var(--accent);
   background: var(--accent-soft);
   border-radius: var(--r-s);
 }
@@ -1568,7 +1627,7 @@ option {
   display: flex;
   flex-direction: column;
   max-width: 560px;
-  margin-bottom: 10px;
+  margin-bottom: 12px;
   border: 1px solid var(--line-soft);
   border-radius: var(--r-m);
   /* Own scroller: a long library stays a fixed-height box instead of
@@ -1580,10 +1639,10 @@ option {
 }
 .games > p {
   margin: 0;
-  padding: 12px 14px;
+  padding: 12px 16px;
 }
 .game-row {
-  padding: 10px 14px;
+  padding: 10px 16px;
 }
 .game-row + .game-row {
   border-top: 1px solid var(--line-soft);
@@ -1614,10 +1673,10 @@ option {
 
 .rl-facts {
   display: grid;
-  grid-template-columns: 140px 1fr;
-  gap: 6px 16px;
-  margin: 0 0 12px;
-  max-width: 680px;
+  /* Same label column as .s-row, so values line up with the rows above. */
+  grid-template-columns: minmax(170px, 260px) minmax(0, 1fr);
+  gap: 8px 24px;
+  margin: 0 0 16px;
 }
 .rl-facts > div {
   display: contents;
@@ -1630,7 +1689,7 @@ option {
   min-width: 0;
 }
 .rl-status {
-  font-weight: 600;
+  font-weight: 500;
 }
 .rl-enabled {
   color: var(--ok);
@@ -1641,7 +1700,7 @@ option {
 
 .report {
   margin-top: 12px;
-  padding: 12px 14px;
+  padding: 12px 16px;
   border: 1px solid var(--line-soft);
   border-radius: var(--r-m);
   max-width: 620px;
@@ -1673,7 +1732,7 @@ option {
   gap: 24px;
   padding: 8px 8px 8px 16px;
   border: 1px solid var(--line);
-  border-radius: 10px;
+  border-radius: var(--r-l);
   background: var(--raise);
   box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
   z-index: 20;
@@ -1697,12 +1756,19 @@ option {
     grid-template-rows: none;
     overflow-y: auto;
   }
+  .clipview {
+    align-content: start;
+  }
+  /* Rows size to their content; with min-height 0 the grid split the window
+   * height between them and the side panel slid over the timeline. */
   .clip-main,
   .clip-side {
     overflow: visible;
+    min-height: auto;
   }
   .clip-side {
     padding-top: 0;
+    max-width: 560px;
   }
   .player {
     flex: none;
@@ -1750,8 +1816,8 @@ option {
 
 .card-star {
   position: absolute;
-  top: 6px;
-  right: 6px;
+  top: 8px;
+  right: 8px;
   display: grid;
   place-items: center;
   width: 28px;
@@ -1762,7 +1828,7 @@ option {
   color: var(--text);
   cursor: pointer;
   opacity: 0;
-  transition: opacity 0.12s;
+  transition: opacity 0.12s var(--ease), background-color 0.12s var(--ease);
 }
 .card:hover .card-star,
 .card-star:focus-visible,
@@ -1794,7 +1860,7 @@ option {
   width: 28px;
 }
 .speed {
-  height: 26px;
+  height: 28px;
   width: 64px;
   font-variant-numeric: tabular-nums;
 }

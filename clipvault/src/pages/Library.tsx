@@ -19,7 +19,7 @@ import { reportError } from "../lib/toast";
 const MIN_CARD = 300;
 const MAX_COLS = 4;
 const GAP = 20; // keep in sync with .grid-row gap
-const INFO_H = 66; // title + meta under the 16:9 thumbnail
+const INFO_H = 60; // title + meta under the 16:9 thumbnail (keep in sync with .card-info)
 const BANNER_KEY = "clipvault.importBannerDismissed";
 
 // Kept across visits so "back" from a clip lands where you were.
@@ -314,7 +314,7 @@ export function Library() {
           <input
             ref={searchRef}
             type="search"
-            placeholder="Search title, tag, game, marker, date…"
+            placeholder="Search clips"
             title="Every word must match. Searches title, description, tags, game, markers (goal, laugh…) and date (2026-11-20)."
             value={search}
             onChange={(e) => setSearch(e.target.value)}
