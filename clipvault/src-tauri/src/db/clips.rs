@@ -351,6 +351,21 @@ pub fn delete_rows(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Paths of every clip in the library.
+pub fn all_paths(conn: &Connection) -> Result<Vec<PathBuf>> {
+    let mut st = conn.prepare("SELECT path FROM clips")?;
+    let paths = st.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(paths.into_iter().map(PathBuf::from).collect())
+}
+
+/// Id of the native row for the file at `path` (compared
+/// case-insensitively, as the unique index does), if any.
+pub fn id_by_path(conn: &Connection, path: &std::path::Path) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT id FROM clips WHERE source = 'native' AND path = ?1 COLLATE NOCASE", [path.to_string_lossy()], |r| r.get(0))
+        .optional()?)
+}
+
 /// True when the source clip is in the library or was removed from it.
 pub fn exists_source(conn: &Connection, source: &str, source_id: &str) -> Result<bool> {
     Ok(conn.query_row(
@@ -414,6 +429,7 @@ mod tests {
         let conn = open_memory().unwrap();
         for (i, id) in ["a", "b", "c"].iter().enumerate() {
             let mut c = sample(id, "native", None);
+            c.path = format!(r"E:\GameClips\{id}.mp4").into();
             c.recorded_at = DateTime::parse_from_rfc3339(&format!("2026-11-0{}T10:00:00+01:00", i + 1)).unwrap();
             c.markers = (0..i).map(|k| Marker { t_s: k as f64, kind: MarkerKind::Manual, label: format!("{id}{k}") }).collect();
             insert(&conn, &c).unwrap();

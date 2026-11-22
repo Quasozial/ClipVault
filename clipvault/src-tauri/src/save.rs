@@ -278,7 +278,16 @@ impl SaveService {
         };
         let db = self.db.clone();
         let row = clip.clone();
-        tokio::task::spawn_blocking(move || clips::insert(&locks::lock(&db), &row))
+        tokio::task::spawn_blocking(move || {
+            let conn = locks::lock(&db);
+            // A rescan may have picked the new file up first; this save's
+            // row (with markers and the real title) replaces that one.
+            if let Some(old) = clips::id_by_path(&conn, &row.path)? {
+                tracing::info!("replacing rescanned row {old} for {}", row.path.display());
+                clips::delete_rows(&conn, &old)?;
+            }
+            clips::insert(&conn, &row)
+        })
             .await
             .map_err(|e| format!("internal error: {e}"))?
             .map_err(|e| {

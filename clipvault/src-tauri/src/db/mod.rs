@@ -24,7 +24,26 @@ const SCHEMA_V3: &str = "ALTER TABLE clips ADD COLUMN compressed INTEGER NOT NUL
 /// v4: index for the library's newest-first order (`ORDER BY
 /// julianday(recorded_at) DESC, id`), so a refresh does not sort every row.
 const SCHEMA_V4: &str = "CREATE INDEX idx_clips_recorded_jd ON clips(julianday(recorded_at) DESC, id);";
-const LATEST_VERSION: i64 = 4;
+/// v5: one native row per file. A rescan racing a save could add the same
+/// file twice (and deleting one row then trashed the other's file).
+/// Duplicates are merged first, keeping the row with the most markers (then
+/// starred, then oldest); paths compare case-insensitively like Windows
+/// does. Moments clips are exempt: several can cut one recording.
+const SCHEMA_V5: &str = "
+DELETE FROM clips WHERE rowid IN (
+    SELECT rowid FROM (
+        SELECT c.rowid AS rowid,
+               ROW_NUMBER() OVER (
+                   PARTITION BY c.path COLLATE NOCASE
+                   ORDER BY (SELECT count(*) FROM markers m WHERE m.clip_id = c.id) DESC, c.starred DESC, c.rowid
+               ) AS rn
+        FROM clips c
+        WHERE c.source = 'native'
+    ) WHERE rn > 1
+);
+CREATE UNIQUE INDEX idx_clips_native_path ON clips(path COLLATE NOCASE) WHERE source = 'native';
+";
+const LATEST_VERSION: i64 = 5;
 
 /// How long a statement waits for another connection's write lock (the
 /// Moments import uses its own connection) before failing with SQLITE_BUSY.
@@ -253,6 +272,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", 4)?;
         tx.commit()?;
     }
+    if version < 5 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V5)?;
+        tx.pragma_update(None, "user_version", 5)?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -372,6 +397,45 @@ mod tests {
         Connection::open(&path).unwrap().pragma_update(None, "user_version", LATEST_VERSION + 1).unwrap();
         let err = open(&path).unwrap_err().to_string();
         assert!(err.contains("newer than supported"), "{err}");
+    }
+
+    #[test]
+    fn db_migration_v5_merges_duplicate_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "foreign_keys", "ON").unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute_batch(SCHEMA_V2).unwrap();
+            tx.execute_batch(SCHEMA_V3).unwrap();
+            tx.execute_batch(SCHEMA_V4).unwrap();
+            tx.pragma_update(None, "user_version", 4).unwrap();
+            tx.commit().unwrap();
+            conn.execute_batch(
+                r"INSERT INTO games (name) VALUES ('RL');
+                 INSERT INTO clips (id, title, path, game_id, recorded_at, duration, fps, width, height, size,
+                    source, created_at, updated_at)
+                 VALUES ('rescanned', 't', 'E:\Clips\a.mp4', 1, '2026-01-01T00:00:00+00:00', 1, 60, 1, 1, 1, 'native', 'x', 'x'),
+                        ('saved', 't', 'e:\clips\A.mp4', 1, '2026-01-01T00:00:00+00:00', 1, 60, 1, 1, 1, 'native', 'x', 'x'),
+                        ('m1', 't', 'E:\Clips\a.mp4', 1, '2026-01-01T00:00:00+00:00', 1, 60, 1, 1, 1, 'moments', 'x', 'x'),
+                        ('other', 't', 'E:\Clips\b.mp4', 1, '2026-01-01T00:00:00+00:00', 1, 60, 1, 1, 1, 'native', 'x', 'x');
+                 INSERT INTO markers (clip_id, t_seconds, type) VALUES ('saved', 1, 'saved');",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let ids: Vec<String> =
+            conn.prepare("SELECT id FROM clips ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(ids, ["m1", "other", "saved"]);
+        let dup = conn.execute(
+            r"INSERT INTO clips (id, title, path, game_id, recorded_at, duration, fps, width, height, size, source, created_at, updated_at)
+             VALUES ('x', 't', 'E:\CLIPS\B.MP4', 1, '2026-01-01T00:00:00+00:00', 1, 60, 1, 1, 1, 'native', 'x', 'x')",
+            [],
+        );
+        assert!(dup.is_err(), "a second row for the same file must be refused");
     }
 
     #[test]

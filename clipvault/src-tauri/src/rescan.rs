@@ -120,6 +120,10 @@ pub fn rescan(db: &Mutex<Connection>, ffmpeg: &Path, dir: &Path, since: Option<S
             compressed: false,
         };
         let conn = locks::lock(db);
+        // A save may have added this file while it was being probed.
+        if clips::id_by_path(&conn, &path)?.is_some() {
+            continue;
+        }
         clips::insert(&conn, &clip)?;
         if av1 || !may_compress {
             clips::set_compressed(&conn, &clip.id, clip.size)?;

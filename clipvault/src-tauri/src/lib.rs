@@ -170,10 +170,15 @@ async fn import_moments(
         )?;
         // The import can take minutes: merge onto the settings as they are now,
         // so changes made meanwhile are kept. A failure must not lose the report.
-        if let Some(merged) = import_moments::merge_imported_settings(&core.settings(), &report.imported_settings) {
-            if let Err(e) = core.apply_settings(merged) {
-                tracing::error!("[moments] could not apply imported settings: {e:#}");
+        // The merge runs under the settings lock, so nothing saved meanwhile is lost.
+        if let Err(e) = core.update_settings(|cur| {
+            let merged = import_moments::merge_imported_settings(cur, &report.imported_settings);
+            if let Some(m) = &merged {
+                library::validate_settings(m).map_err(anyhow::Error::msg)?;
             }
+            Ok(merged)
+        }) {
+            tracing::error!("[moments] could not apply imported settings: {e:#}");
         }
         // Imported clips may live in folders the webview may not read yet.
         commands::refresh_asset_scope(&app, &core);

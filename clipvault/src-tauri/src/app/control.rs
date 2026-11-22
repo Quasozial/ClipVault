@@ -48,7 +48,17 @@ pub(super) async fn control_loop(
 ) {
     // Before any save or compression: leftovers of an interrupted one (quit, crash).
     let capture_dir = core.settings().capture_dir;
-    let _ = tokio::task::spawn_blocking(move || crate::compress::clean_stale_temps(&capture_dir)).await;
+    let db = core.db();
+    let _ = tokio::task::spawn_blocking(move || {
+        let clip_paths = crate::db::clips::all_paths(&locks::lock(&db)).unwrap_or_else(|e| {
+            tracing::warn!("listing clip folders for temp cleanup: {e:#}");
+            Vec::new()
+        });
+        for dir in crate::compress::temp_dirs(&capture_dir, &clip_paths) {
+            crate::compress::clean_stale_temps(&dir);
+        }
+    })
+    .await;
     // Before the first capture: which video encoders this PC can run.
     let encoders = core.probe_encoders().await;
     let hdr_gpu = match core.cfg.ffmpeg.clone() {

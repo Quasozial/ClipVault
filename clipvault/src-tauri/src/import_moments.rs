@@ -232,12 +232,14 @@ pub struct ImportedSettings {
 pub fn merge_imported_settings(current: &Settings, imported: &ImportedSettings) -> Option<Settings> {
     let defaults = Settings::default();
     let mut out = current.clone();
-    if let Some(dir) = &imported.capture_dir {
+    // Only values ClipVault itself accepts (see `library::validate_settings`):
+    // an absolute folder, 30 or 60 fps.
+    if let Some(dir) = imported.capture_dir.as_ref().filter(|d| d.is_absolute()) {
         if current.capture_dir == defaults.capture_dir {
             out.capture_dir = dir.clone();
         }
     }
-    if let Some(fps) = imported.fps {
+    if let Some(fps) = imported.fps.filter(|f| matches!(f, 30 | 60)) {
         if current.fps == defaults.fps {
             out.fps = fps;
         }
@@ -747,6 +749,16 @@ mod tests {
         assert!(merge_imported_settings(&cur, &ImportedSettings::default()).is_none());
         let same = ImportedSettings { capture_dir: Some(cur.capture_dir.clone()), fps: Some(cur.fps) };
         assert!(merge_imported_settings(&cur, &same).is_none());
+    }
+
+    #[test]
+    fn merge_skips_values_clipvault_rejects() {
+        let cur = Settings::default();
+        let imp = ImportedSettings { capture_dir: Some(r"Moments\clips".into()), fps: Some(144) };
+        assert!(merge_imported_settings(&cur, &imp).is_none());
+        let imp = ImportedSettings { capture_dir: Some(r"Moments\clips".into()), fps: Some(30) };
+        let m = merge_imported_settings(&cur, &imp).unwrap();
+        assert_eq!((m.fps, m.capture_dir), (30, cur.capture_dir.clone()));
     }
 
     #[test]

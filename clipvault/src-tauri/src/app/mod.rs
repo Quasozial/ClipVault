@@ -42,6 +42,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 /// How long Quit waits for a running save (concat normally takes under 1 s).
 const SHUTDOWN_SAVE_WAIT: Duration = Duration::from_secs(15);
+/// How long Quit waits for capture to stop. The control loop can be stuck
+/// (startup probes, a WASAPI thread on a removed device); FFmpeg dies with
+/// the process anyway through its kill-on-close job.
+const SHUTDOWN_CAPTURE_WAIT: Duration = Duration::from_secs(10);
 
 pub struct CoreConfig {
     /// `%LOCALAPPDATA%\ClipVault`: settings.json, library.db, thumbs\.
@@ -267,10 +271,16 @@ impl AppCore {
             tracing::warn!("quitting while a save is still running (waited {} s)", SHUTDOWN_SAVE_WAIT.as_secs());
         }
         let (tx, rx) = oneshot::channel();
-        if self.cmd_tx.send(Cmd::Shutdown(tx)).is_ok() {
-            let _ = rx.await;
+        let stopped = if self.cmd_tx.send(Cmd::Shutdown(tx)).is_ok() {
+            tokio::time::timeout(SHUTDOWN_CAPTURE_WAIT, async {
+                let _ = rx.await;
+            })
+            .await
         } else {
-            self.supervisor.stop().await;
+            tokio::time::timeout(SHUTDOWN_CAPTURE_WAIT, self.supervisor.stop()).await
+        };
+        if stopped.is_err() {
+            tracing::warn!("capture did not stop within {} s; quitting anyway", SHUTDOWN_CAPTURE_WAIT.as_secs());
         }
     }
 
@@ -379,8 +389,21 @@ impl AppCore {
     /// only for capture-relevant changes; desktop toggle on the next tick.
     /// (Hotkeys and autostart are re-applied by the Tauri layer.)
     pub fn apply_settings(&self, new: Settings) -> anyhow::Result<()> {
-        new.save(&self.settings_path)?;
-        let old = std::mem::replace(&mut *locks::write(&self.settings), new.clone());
+        self.update_settings(|_| Ok(Some(new)))
+    }
+
+    /// Read-modify-write of the settings: `f` gets the current settings and
+    /// returns the new ones (`None` = no change). The file and the in-memory
+    /// copy are updated under one write lock, so concurrent writers (Settings
+    /// page, desktop hotkey, Moments merge) can neither lose an update nor
+    /// leave file and memory disagreeing.
+    pub fn update_settings(&self, f: impl FnOnce(&Settings) -> anyhow::Result<Option<Settings>>) -> anyhow::Result<()> {
+        let (old, new) = {
+            let mut cur = locks::write(&self.settings);
+            let Some(new) = f(&cur)? else { return Ok(()) };
+            new.save(&self.settings_path)?;
+            (std::mem::replace(&mut *cur, new.clone()), new)
+        };
         self.save.set_config(save_config(&self.cfg, &new));
         if old.max_save_length_s != new.max_save_length_s {
             // Live: a longer maximum keeps more buffer from now on (no restart,

@@ -10,6 +10,14 @@ import { navigate } from "../lib/stores";
 import { EXPORT_PRESETS, exportOptions, exportTracks, formatSpeed, frameStep, markerJump, SPEEDS, stepSpeed } from "../lib/player";
 import { reportError, toast } from "../lib/toast";
 
+type Meta = { title: string; description: string; tags: string[] };
+
+const metaOf = (c: Clip): Meta => ({ title: c.title, description: c.description, tags: c.tags });
+
+function sameMeta(a: Meta, b: Meta): boolean {
+  return a.title === b.title && a.description === b.description && a.tags.join("\u0000") === b.tags.join("\u0000");
+}
+
 const VOL_KEY = "clipvault.trackVolume.";
 /** Re-sync a track when it drifts further than this from the video (s). */
 const MAX_DRIFT = 0.12;
@@ -122,20 +130,40 @@ export function ClipView({ id }: { id: string }) {
   const separate = useRef(separateAudio);
   separate.current = separateAudio;
 
-  const accept = useCallback((c: Clip) => {
-    setClip(c);
-    setTitle(c.title);
-    setDescription(c.description);
-  }, []);
+  const [tags, setTags] = useState<string[]>([]);
+  // Metadata the user last committed (`wanted`) and the last the backend
+  // accepted (`saved`). Saves run one at a time and always send all of
+  // `wanted`, so a slow save can never revert a newer edit.
+  const wanted = useRef<Meta | null>(null);
+  const saved = useRef<Meta | null>(null);
+  const saveChain = useRef<Promise<void>>(Promise.resolve());
+  // Esc in the title field: the blur that follows must not save.
+  const titleCancelled = useRef(false);
 
   useEffect(() => {
+    let stale = false;
     setClip(null);
     setLoadError(null);
-    api.getClip(id).then(accept, (e) => {
-      setLoadError(e.message);
-      reportError("Could not open the clip", e);
-    });
-  }, [id, accept]);
+    wanted.current = saved.current = null;
+    api.getClip(id).then(
+      (c) => {
+        if (stale) return;
+        wanted.current = saved.current = metaOf(c);
+        setClip(c);
+        setTitle(c.title);
+        setDescription(c.description);
+        setTags(c.tags);
+      },
+      (e) => {
+        if (stale) return;
+        setLoadError(e.message);
+        reportError("Could not open the clip", e);
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [id]);
 
   // Background compression finished: new size, and the Compress button goes.
   const [compressQueued, setCompressQueued] = useState(false);
@@ -316,23 +344,41 @@ export function ClipView({ id }: { id: string }) {
     } else v.pause();
   }, []);
 
+  const clipId = clip?.id;
   const saveMeta = useCallback(
-    async (next: { title?: string; description?: string; tags?: string[] }) => {
-      if (!clip) return;
-      const t = next.title ?? clip.title;
-      const d = next.description ?? clip.description;
-      const tags = next.tags ?? clip.tags;
-      if (t === clip.title && d === clip.description && tags.join("\u0000") === clip.tags.join("\u0000")) return;
-      try {
-        accept(await api.updateClipMeta(clip.id, t, d, tags));
-        setTitleError(null);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (next.title !== undefined) setTitleError(msg);
-        else reportError("Could not save changes", e);
-      }
+    (next: Partial<Meta>) => {
+      const base = wanted.current;
+      if (!clipId || !base) return;
+      const want = { ...base, ...next };
+      if (sameMeta(want, base)) return;
+      wanted.current = want;
+      if (next.tags) setTags(next.tags);
+      const run = saveChain.current.then(async () => {
+        try {
+          const c = await api.updateClipMeta(clipId, want.title, want.description, want.tags);
+          saved.current = metaOf(c);
+          if (next.title !== undefined) setTitleError(null);
+          // A newer edit is queued: its response updates the view.
+          if (wanted.current !== want) return;
+          wanted.current = saved.current;
+          setClip(c);
+          // Show the stored (normalised) text, unless the user typed on meanwhile.
+          setTitle((cur) => (cur === want.title ? c.title : cur));
+          setDescription((cur) => (cur === want.description ? c.description : cur));
+          setTags(c.tags);
+        } catch (e) {
+          if (wanted.current === want && saved.current) {
+            wanted.current = saved.current;
+            setTags(saved.current.tags);
+          }
+          const msg = e instanceof Error ? e.message : String(e);
+          if (next.title !== undefined) setTitleError(msg);
+          else reportError("Could not save changes", e);
+        }
+      });
+      saveChain.current = run;
     },
-    [clip, accept],
+    [clipId],
   );
 
   const changeTrim = useCallback(
@@ -482,10 +528,20 @@ export function ClipView({ id }: { id: string }) {
             aria-label="Title"
             aria-invalid={Boolean(titleError)}
             onChange={(e) => setTitle(e.target.value)}
-            onBlur={() => void saveMeta({ title })}
+            onBlur={() => {
+              if (titleCancelled.current) {
+                titleCancelled.current = false;
+                return;
+              }
+              saveMeta({ title });
+            }}
             onKeyDown={(e) => {
               if (e.key === "Enter") e.currentTarget.blur();
-              if (e.key === "Escape") setTitle(clip.title);
+              if (e.key === "Escape") {
+                titleCancelled.current = true;
+                setTitle(wanted.current?.title ?? clip.title);
+                setTitleError(null);
+              }
             }}
           />
           <button
@@ -676,13 +732,13 @@ export function ClipView({ id }: { id: string }) {
             value={description}
             placeholder="What happened?"
             onChange={(e) => setDescription(e.target.value)}
-            onBlur={() => void saveMeta({ description })}
+            onBlur={() => saveMeta({ description })}
           />
         </label>
 
         <div className="field">
           <span className="field-label">Tags</span>
-          <TagEditor tags={clip.tags} onChange={(tags) => void saveMeta({ tags })} />
+          <TagEditor tags={tags} onChange={(t) => saveMeta({ tags: t })} />
         </div>
 
         <div className="side-block">

@@ -209,6 +209,19 @@ pub fn clean_stale_temps(dir: &Path) -> usize {
     removed
 }
 
+/// Folders that can hold such leftovers: the capture folder, its `Exports`
+/// (share exports) and every folder of a library clip (trims and
+/// compressions write next to the clip, which may be an older capture
+/// folder). Deduplicated case-insensitively, in first-seen order.
+pub fn temp_dirs(capture_dir: &Path, clip_paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut seen = std::collections::HashSet::new();
+    [capture_dir.to_path_buf(), capture_dir.join("Exports")]
+        .into_iter()
+        .chain(clip_paths.iter().filter_map(|p| p.parent().map(Path::to_path_buf)))
+        .filter(|d| !d.as_os_str().is_empty() && seen.insert(d.to_string_lossy().to_lowercase()))
+        .collect()
+}
+
 /// Duration and stream count FFmpeg reports for a media file.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MediaInfo {
@@ -455,6 +468,16 @@ At least one output file must be specified
             assert!(dir.path().join(n).exists(), "{n}");
         }
         assert_eq!(clean_stale_temps(&dir.path().join("missing")), 0);
+    }
+
+    #[test]
+    fn temp_dirs_cover_exports_and_clip_folders() {
+        let cap = Path::new(r"E:\Clips");
+        let clips = [PathBuf::from(r"E:\Clips\a.mp4"), PathBuf::from(r"D:\Old\b.mp4"), PathBuf::from(r"d:\old\c.mp4")];
+        assert_eq!(
+            temp_dirs(cap, &clips),
+            [PathBuf::from(r"E:\Clips"), PathBuf::from(r"E:\Clips\Exports"), PathBuf::from(r"D:\Old")]
+        );
     }
 
     #[test]
