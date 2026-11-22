@@ -4,6 +4,7 @@ pub mod capture;
 pub mod commands;
 pub mod compress;
 pub mod db;
+pub mod disk;
 pub mod events;
 pub mod export;
 pub mod ffmpeg_proc;

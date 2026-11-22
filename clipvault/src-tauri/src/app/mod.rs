@@ -238,6 +238,7 @@ impl AppCore {
         rt.spawn(control::health_loop(self.clone(), self.sup_events.subscribe()));
         rt.spawn(control::levels_loop(self.clone(), level_rx));
         rt.spawn(backup_loop(self.db.clone(), self.cfg.data_dir.join("backups")));
+        rt.spawn(disk_loop(self.clone()));
         if let Some(since) = locks::lock(&self.rescan_after_restore).take() {
             self.spawn_rescan(since);
         }
@@ -538,6 +539,51 @@ fn save_config(cfg: &CoreConfig, s: &Settings) -> SaveConfig {
         temp_root: save_temp_root(cfg, s),
         save_length: Duration::from_secs(s.effective_save_length_s() as u64),
     }
+}
+
+/// How often free space of the buffer and clip volumes is checked.
+const DISK_CHECK: Duration = Duration::from_secs(60);
+
+/// Warns (toast + in-game banner) once when the volume holding the buffer or
+/// the clips drops below [`crate::disk::LOW_SPACE`], again only after it has
+/// recovered. Runs from startup, so a full drive is announced before the
+/// first save fails on it.
+async fn disk_loop(core: Arc<AppCore>) {
+    let mut tick = tokio::time::interval(DISK_CHECK);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut watcher = crate::disk::LowSpaceWatcher::default();
+    loop {
+        tick.tick().await;
+        let s = core.settings();
+        let dirs = [(s.buffer_dir.clone(), "replay buffer"), (s.capture_dir.clone(), "clips")];
+        let readings = tokio::task::spawn_blocking(move || disk_readings(&dirs)).await.unwrap_or_default();
+        for (volume, uses, free) in readings {
+            if watcher.on_reading(&volume, free) {
+                let text = crate::disk::low_space_text(&volume, &uses, free);
+                tracing::warn!("[disk] {text}");
+                core.ui.toast(APP_TITLE, &text);
+                let detail = format!("{}: {} left", volume.display(), crate::disk::format_bytes(free));
+                core.ui.banner(notify::BannerKind::Error, "Low disk space", &detail);
+            }
+        }
+    }
+}
+
+/// One `(volume, what lives there, free bytes)` per volume of `dirs`.
+fn disk_readings(dirs: &[(PathBuf, &str)]) -> Vec<(PathBuf, String, u64)> {
+    let mut out: Vec<(PathBuf, String, u64)> = Vec::new();
+    for (dir, uses) in dirs {
+        let volume = crate::disk::volume_key(dir);
+        if let Some(r) = out.iter_mut().find(|r| r.0 == volume) {
+            r.1 = format!("{} and {uses}", r.1);
+            continue;
+        }
+        match crate::disk::free_bytes(dir) {
+            Ok(free) => out.push((volume, uses.to_string(), free)),
+            Err(e) => tracing::debug!("[disk] cannot read free space of {}: {e}", dir.display()),
+        }
+    }
+    out
 }
 
 /// How often the backup loop checks for a missing daily backup.

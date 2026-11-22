@@ -222,6 +222,9 @@ impl SaveService {
         if linked.is_empty() {
             return Err(format!("no recorded video in the last {} s", cfg.save_length.as_secs()));
         }
+        // The stream-copied clip is about as big as its segments: fail now,
+        // with a clear reason, rather than with a truncated file mid-concat.
+        check_space(&cfg.capture_dir, &linked).await?;
         // Metadata of the capture that recorded this footage (it may have
         // ended, or been restarted with another layout, since). A known
         // layout also names the clip after what it recorded.
@@ -339,6 +342,25 @@ fn snapshot_and_link(
         return Err("all recorded segments were deleted before they could be saved".into());
     }
     Ok((selection.has_gap, layout, linked))
+}
+
+/// Errors if the clip made of `linked` would not fit in `dir`. A failed probe
+/// is logged and lets the save go ahead (the probe must never cost a clip).
+async fn check_space(dir: &Path, linked: &[Segment]) -> Result<(), String> {
+    let dir = dir.to_path_buf();
+    let paths: Vec<PathBuf> = linked.iter().map(|s| s.path.clone()).collect();
+    tokio::task::spawn_blocking(move || {
+        let clip_bytes: u64 = paths.iter().filter_map(|p| std::fs::metadata(p).ok()).map(|m| m.len()).sum();
+        match crate::disk::free_bytes(&dir) {
+            Ok(free) => crate::disk::save_space_error(&dir, free, clip_bytes).map_or(Ok(()), Err),
+            Err(e) => {
+                tracing::warn!("[save] could not read free space of {}: {e}; saving anyway", dir.display());
+                Ok(())
+            }
+        }
+    })
+    .await
+    .map_err(|e| format!("internal error: {e}"))?
 }
 
 fn link_or_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
