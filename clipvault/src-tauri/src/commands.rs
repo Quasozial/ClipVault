@@ -296,32 +296,50 @@ pub async fn move_clips_preview(core: Core<'_>, from: String) -> Result<crate::r
     blocking(move || crate::relocate::preview(&crate::locks::lock(&db), Path::new(&from))).await
 }
 
-/// Moves the library clips in `from` to `to` (see `relocate.rs`), emitting
-/// `move-progress`, then `clips-moved` so open lists reload.
+/// Moves the library clips in `from` to `to` (see `relocate.rs`) in the
+/// background and returns at once. Emits `move-status` (the whole
+/// [`crate::relocate::MoveState`]) on start, per file and at the end, then
+/// `clips-moved` so open lists reload.
 #[tauri::command]
-pub async fn move_clips(app: AppHandle, core: Core<'_>, from: String, to: String) -> Result<crate::relocate::MoveReport, String> {
+pub fn move_clips(app: AppHandle, core: Core<'_>, from: String, to: String) -> Result<(), String> {
+    use crate::relocate::{self, MoveState};
     use tauri::Emitter;
-    let running = crate::relocate::begin().ok_or("Clips are already being moved")?;
+    let running = relocate::begin().ok_or("Clips are already being moved")?;
     let core: Arc<AppCore> = core.inner().clone();
-    blocking(move || {
+    let state = relocate::update_status(|s| *s = MoveState { running: true, from: from.clone(), to: to.clone(), ..Default::default() });
+    let _ = app.emit("move-status", state);
+    tauri::async_runtime::spawn_blocking(move || {
         let _running = running;
         let (db, comp) = (core.db(), core.compressor());
         let a = app.clone();
-        let report = crate::relocate::move_clips(
+        let result = relocate::move_clips(
             &db,
             Path::new(&from),
             Path::new(&to),
             &|id| comp.stage(id).is_some(),
             &|p| crate::disk::free_bytes(p).ok(),
             &mut |p| {
-                let _ = a.emit("move-progress", p);
+                let _ = a.emit("move-status", relocate::update_status(|s| s.progress = Some(p.clone())));
             },
         );
         refresh_asset_scope(&app, &core);
+        let done = relocate::update_status(|s| {
+            s.running = false;
+            match result {
+                Ok(r) => s.report = Some(r),
+                Err(e) => s.error = Some(format!("{e:#}")),
+            }
+        });
+        let _ = app.emit("move-status", done);
         let _ = app.emit("clips-moved", ());
-        report
-    })
-    .await
+    });
+    Ok(())
+}
+
+/// The running or last finished move (`null`: none since ClipVault started).
+#[tauri::command]
+pub fn move_status() -> Option<crate::relocate::MoveState> {
+    crate::relocate::status()
 }
 
 /// Stops a running move after the current file.

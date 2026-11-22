@@ -1757,6 +1757,18 @@ select.chip-more {
   font-family: var(--mono);
   font-size: 12.5px !important;
 }
+.move-status {
+  width: 100%;
+  max-width: 460px;
+  margin-top: 4px;
+}
+.move-status > p {
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+.move-status-actions {
+  margin-top: 8px;
+}
 .row-actions {
   display: flex;
   align-items: center;

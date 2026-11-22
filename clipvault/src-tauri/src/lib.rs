@@ -331,6 +331,7 @@ pub fn run() {
             commands::move_clips_preview,
             commands::move_clips,
             commands::cancel_move_clips,
+            commands::move_status,
             commands::list_audio_devices,
             commands::rl_stats_status,
             commands::rl_enable_stats

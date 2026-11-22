@@ -16,11 +16,11 @@ import {
 } from "../api";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { MicMeter } from "../components/MicMeter";
-import { MoveClipsDialog } from "../components/MoveClipsDialog";
+import { MoveClipsDialog, MoveStatusPanel } from "../components/MoveClipsDialog";
 import { ConfirmDialog, Toggle } from "../components/ui";
 import { settingsOpenSync } from "../lib/settingsOpen";
 import { rebaseSettings } from "../lib/settingsMerge";
-import { startImport, useImport } from "../lib/stores";
+import { moveRunning, startImport, useImport } from "../lib/stores";
 import { reportError, toast } from "../lib/toast";
 
 const SECTIONS = [
@@ -474,7 +474,7 @@ export function Settings({ section }: { section?: string }) {
       setSaveError(null);
       toast.info(errs.length ? "Settings saved, but some hotkeys could not be registered" : "Settings saved");
       const [from, to] = [saved.capture_dir, after.capture_dir];
-      if (from.trim().toLowerCase() !== to.trim().toLowerCase()) {
+      if (from.trim().toLowerCase() !== to.trim().toLowerCase() && !moveRunning()) {
         api.moveClipsPreview(from).then(
           (preview) => preview.count > 0 && setMove({ from, to, preview }),
           (e) => reportError("Could not check the old clip folder", e),
@@ -607,6 +607,7 @@ export function Settings({ section }: { section?: string }) {
           </Row>
           <Row label="Clip folder" hint="Saved clips go here. After a change, ClipVault offers to move your clips from the old folder." htmlFor="cdir">
             <input id="cdir" className="path-input" value={draft.capture_dir} onChange={(e) => set("capture_dir", e.target.value)} spellCheck={false} />
+            <MoveStatusPanel />
           </Row>
           <Row
             label="Compress saved clips"

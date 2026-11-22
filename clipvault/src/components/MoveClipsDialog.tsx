@@ -1,45 +1,131 @@
 import { useEffect, useRef, useState } from "react";
-import { api, on, type MovePreview, type MoveProgress, type MoveReport } from "../api";
+import { api, type MovePreview, type MoveState } from "../api";
 import { formatBytes } from "../lib/format";
+import { dismissMove, startMove, useMove } from "../lib/stores";
+
+const n = (k: number) => `${k} ${k === 1 ? "clip" : "clips"}`;
+
+/** Progress bar, status line and result of a clip move (dialog and Settings). */
+export function MoveStatusView({ move, stopping }: { move: MoveState; stopping?: boolean }) {
+  const p = move.progress;
+  const pct = p && p.bytes_total > 0 ? (p.bytes_done / p.bytes_total) * 100 : 0;
+  if (move.running) {
+    return (
+      <div className="progress" aria-live="polite">
+        <div className="progress-bar">
+          <span style={{ width: `${Math.max(4, pct)}%` }} />
+        </div>
+        <small>
+          {stopping
+            ? "Stopping after this clip…"
+            : p
+              ? `Moving ${Math.min(p.done + 1, p.total)} of ${p.total} · ${formatBytes(p.bytes_done)} of ${formatBytes(p.bytes_total)} · ${Math.floor(pct)}%`
+              : "Starting…"}
+        </small>
+      </div>
+    );
+  }
+  if (move.error) {
+    return (
+      <p className="field-error" role="alert">
+        Moving clips failed: {move.error}
+      </p>
+    );
+  }
+  const r = move.report;
+  if (!r) return null;
+  return (
+    <>
+      <p>
+        {n(r.moved)} moved to <code>{move.to}</code>
+        {r.cancelled ? " (cancelled)" : ""}.
+        {r.skipped_busy > 0 && ` ${n(r.skipped_busy)} skipped while being compressed; move again later.`}
+      </p>
+      {r.originals_kept.length > 0 && (
+        <p className="hint">
+          {r.originals_kept.length} original {r.originals_kept.length === 1 ? "file was" : "files were"} in use and stayed in the old
+          folder as well; delete them there once they are closed.
+        </p>
+      )}
+      {r.failed.length > 0 && (
+        <ul className="export-failed">
+          {r.failed.map((f) => (
+            <li key={f}>{f}</li>
+          ))}
+        </ul>
+      )}
+    </>
+  );
+}
+
+/** Clip move progress under the Clip folder setting; shown while a move runs and after it until dismissed. */
+export function MoveStatusPanel() {
+  const move = useMove();
+  const [stopping, setStopping] = useState(false);
+  useEffect(() => {
+    if (!move?.running) setStopping(false);
+  }, [move?.running]);
+  if (!move) return null;
+  return (
+    <div className="move-status">
+      <MoveStatusView move={move} stopping={stopping} />
+      <div className="move-status-actions">
+        {move.running ? (
+          <button
+            type="button"
+            className="btn"
+            disabled={stopping}
+            onClick={() => {
+              setStopping(true);
+              void api.cancelMoveClips();
+            }}
+          >
+            Cancel move
+          </button>
+        ) : (
+          <button type="button" className="btn" onClick={dismissMove}>
+            Dismiss
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
 
 /**
  * Offered after the clip folder changed: moves the library clips from the old
  * folder to the new one (files and library paths; titles, tags and markers
- * stay). Cancel stops after the file being moved.
+ * stay). The move runs in the background: the dialog can be hidden and the
+ * Clip folder setting keeps showing its progress.
  */
 export function MoveClipsDialog({ from, to, preview, onClose }: { from: string; to: string; preview: MovePreview; onClose(): void }) {
   const ref = useRef<HTMLDialogElement>(null);
-  const [progress, setProgress] = useState<MoveProgress | null>(null);
-  const [running, setRunning] = useState(false);
+  const move = useMove();
+  const [started, setStarted] = useState(false);
   const [stopping, setStopping] = useState(false);
-  const [report, setReport] = useState<MoveReport | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     ref.current?.showModal();
   }, []);
-  useEffect(() => on("move-progress", setProgress), []);
 
   const start = async () => {
-    setRunning(true);
     setError(null);
     try {
-      setReport(await api.moveClips(from, to));
+      await startMove(from, to);
+      setStarted(true);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRunning(false);
     }
   };
 
   const close = () => {
-    if (running) return;
     ref.current?.close();
     onClose();
   };
 
-  const n = (k: number) => `${k} ${k === 1 ? "clip" : "clips"}`;
-  const pct = progress && progress.bytes_total > 0 ? (progress.bytes_done / progress.bytes_total) * 100 : 0;
+  const running = started && move?.running;
+  const finished = started && move && !move.running;
 
   return (
     <dialog
@@ -54,14 +140,14 @@ export function MoveClipsDialog({ from, to, preview, onClose }: { from: string; 
     >
       <h2>Move your clips?</h2>
       <div className="dialog-body">
-        {!running && !report && (
+        {!started && (
           <>
             <p>
               {n(preview.count)} ({formatBytes(preview.bytes)}) are still in <code>{from}</code>. Move them to <code>{to}</code>?
             </p>
             <p className="hint">
-              Titles, tags, markers and trims stay. Other files in the old folder are left where they are. You can keep using ClipVault
-              while it runs.
+              Titles, tags, markers and trims stay. Other files in the old folder are left where they are. The move runs in the
+              background; its progress stays visible under Clip folder.
             </p>
             {error && (
               <p className="field-error" role="alert">
@@ -70,44 +156,10 @@ export function MoveClipsDialog({ from, to, preview, onClose }: { from: string; 
             )}
           </>
         )}
-        {running && (
-          <div className="progress" aria-live="polite">
-            <div className="progress-bar">
-              <span style={{ width: `${Math.max(4, pct)}%` }} />
-            </div>
-            <small>
-              {stopping
-                ? "Stopping after this clip…"
-                : progress
-                  ? `Moving ${Math.min(progress.done + 1, progress.total)} of ${progress.total} · ${formatBytes(progress.bytes_done)} of ${formatBytes(progress.bytes_total)}`
-                  : "Starting…"}
-            </small>
-          </div>
-        )}
-        {report && (
-          <>
-            <p>
-              {n(report.moved)} moved{report.cancelled ? " (cancelled)" : ""}.
-              {report.skipped_busy > 0 && ` ${n(report.skipped_busy)} skipped while being compressed; move again later.`}
-            </p>
-            {report.originals_kept.length > 0 && (
-              <p className="hint">
-                {report.originals_kept.length} original {report.originals_kept.length === 1 ? "file was" : "files were"} in use and stayed in
-                the old folder as well; delete them there once they are closed.
-              </p>
-            )}
-            {report.failed.length > 0 && (
-              <ul className="export-failed">
-                {report.failed.map((f) => (
-                  <li key={f}>{f}</li>
-                ))}
-              </ul>
-            )}
-          </>
-        )}
+        {started && move && <MoveStatusView move={move} stopping={stopping} />}
       </div>
       <div className="dialog-actions">
-        {!running && !report && (
+        {!started && (
           <>
             <button type="button" className="btn" onClick={close}>
               Keep them there
@@ -118,20 +170,33 @@ export function MoveClipsDialog({ from, to, preview, onClose }: { from: string; 
           </>
         )}
         {running && (
+          <>
+            <button
+              type="button"
+              className="btn"
+              disabled={stopping}
+              onClick={() => {
+                setStopping(true);
+                void api.cancelMoveClips();
+              }}
+            >
+              Cancel
+            </button>
+            <button type="button" className="btn btn-primary" onClick={close} autoFocus>
+              Hide
+            </button>
+          </>
+        )}
+        {finished && (
           <button
             type="button"
-            className="btn"
-            disabled={stopping}
+            className="btn btn-primary"
             onClick={() => {
-              setStopping(true);
-              void api.cancelMoveClips();
+              dismissMove();
+              close();
             }}
+            autoFocus
           >
-            Cancel
-          </button>
-        )}
-        {report && (
-          <button type="button" className="btn btn-primary" onClick={close} autoFocus>
             Done
           </button>
         )}

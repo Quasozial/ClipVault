@@ -21,6 +21,7 @@ import type {
   RlStatsInfo,
   RunningProcess,
   Settings,
+  MoveState,
 } from "../api";
 import sampleUrl from "./sample.mp4?url";
 import { matchesFilter } from "../lib/clips";
@@ -188,6 +189,7 @@ export function createMockBackend(): Backend {
   let health: Health = { state: "idle", reason: null, target: null };
   let settingsOpen = false;
   let moveCancel = false;
+  let moveState: MoveState | null = null;
   const thumbIds = new Map<string, number>();
 
   const listeners = new Map<string, Set<(p: unknown) => void>>();
@@ -443,23 +445,33 @@ export function createMockBackend(): Backend {
       const inDir = clips.filter((c) => c.path.slice(0, c.path.lastIndexOf("\\")).toLowerCase() === String(from).toLowerCase());
       return { count: inDir.length, bytes: inDir.reduce((a, c) => a + c.size, 0) };
     },
-    move_clips: async ({ from, to }) => {
+    move_clips: ({ from, to }) => {
+      if (moveState?.running) throw "Clips are already being moved";
       moveCancel = false;
       const inDir = clips.filter((c) => c.path.slice(0, c.path.lastIndexOf("\\")).toLowerCase() === String(from).toLowerCase());
       const bytes_total = inDir.reduce((a, c) => a + c.size, 0);
-      let bytes_done = 0;
-      let done = 0;
-      emit("move-progress", { done, total: inDir.length, bytes_done, bytes_total });
-      for (const c of inDir) {
-        if (moveCancel) break;
-        await sleep(150);
-        c.path = `${to}\\${c.path.slice(c.path.lastIndexOf("\\") + 1)}`;
-        bytes_done += c.size;
-        emit("move-progress", { done: ++done, total: inDir.length, bytes_done, bytes_total });
-      }
-      emit("clips-moved", null);
-      return { moved: done, skipped_busy: 0, failed: [], originals_kept: [], cancelled: moveCancel };
+      const progress = { done: 0, total: inDir.length, bytes_done: 0, bytes_total };
+      const state: MoveState = { running: true, from: String(from), to: String(to), progress: { ...progress }, report: null, error: null };
+      moveState = state;
+      emit("move-status", { ...state });
+      void (async () => {
+        for (const c of inDir) {
+          if (moveCancel) break;
+          await sleep(300);
+          c.path = `${to}\\${c.path.slice(c.path.lastIndexOf("\\") + 1)}`;
+          progress.done++;
+          progress.bytes_done += c.size;
+          state.progress = { ...progress };
+          emit("move-status", { ...state });
+        }
+        state.running = false;
+        state.report = { moved: progress.done, skipped_busy: 0, failed: [], originals_kept: [], cancelled: moveCancel };
+        emit("move-status", { ...state });
+        emit("clips-moved", null);
+      })();
+      return null;
     },
+    move_status: () => moveState,
     cancel_move_clips: () => {
       moveCancel = true;
       return null;

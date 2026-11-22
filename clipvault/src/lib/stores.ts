@@ -1,6 +1,6 @@
 /** Small app-wide stores (health, Moments import, routing) built on useSyncExternalStore. */
 import { useEffect, useSyncExternalStore } from "react";
-import { api, on, type Health, type ImportProgress, type ImportReport } from "../api";
+import { api, on, type Health, type ImportProgress, type ImportReport, type MoveState } from "../api";
 import { reportError } from "./toast";
 
 function store<T>(initial: T) {
@@ -55,6 +55,50 @@ const importState = store<ImportState>({ running: false, progress: null, report:
 
 export function useImport(): ImportState {
   return useSyncExternalStore(importState.subscribe, importState.get);
+}
+
+// ----- moving clips to another folder (runs in the backend, survives page changes) -----
+
+const moveState = store<MoveState | null>(null);
+let moveStarted = false;
+
+/** The running or last finished clip move, kept current by `move-status`. */
+export function useMove(): MoveState | null {
+  useEffect(() => {
+    if (moveStarted) return;
+    moveStarted = true;
+    on("move-status", (m) => moveState.set(m));
+    api.moveStatus().then(
+      (m) => {
+        // An event may have come in first; it is newer.
+        if (!moveState.get()) moveState.set(m);
+      },
+      (e) => reportError("Could not read the clip move status", e),
+    );
+  }, []);
+  return useSyncExternalStore(moveState.subscribe, moveState.get);
+}
+
+/** Starts moving the library clips in `from` to `to`; progress arrives via `useMove`. */
+export async function startMove(from: string, to: string): Promise<void> {
+  const before = moveState.get();
+  // Shown at once; the backend's `move-status` events replace it.
+  moveState.set({ running: true, from, to, progress: null, report: null, error: null });
+  try {
+    await api.moveClips(from, to);
+  } catch (e) {
+    moveState.set(before);
+    throw e;
+  }
+}
+
+/** True while a clip move runs. */
+export const moveRunning = () => moveState.get()?.running === true;
+
+/** Hides a finished move's summary (the next move shows again). */
+export function dismissMove() {
+  const m = moveState.get();
+  if (m && !m.running) moveState.set(null);
 }
 
 /**

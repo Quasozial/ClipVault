@@ -13,6 +13,8 @@
 //!   may be replaced while it is copied.
 //! * Name clashes in `to` get a `_N` suffix, like saves.
 //! * One move at a time ([`begin`]); [`cancel`] stops after the current file.
+//! * The latest move's state ([`status`]) outlives the page that started it,
+//!   so Settings can show its progress whenever it is opened.
 use crate::db::clips::{self, Clip, ClipFilter};
 use crate::locks;
 use anyhow::{bail, Context, Result};
@@ -50,6 +52,32 @@ pub fn begin() -> Option<Running> {
 /// Asks the running move to stop after the current file.
 pub fn cancel() {
     CANCEL.store(true, Ordering::SeqCst);
+}
+
+/// The running or last finished move, for the UI.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct MoveState {
+    pub running: bool,
+    pub from: String,
+    pub to: String,
+    pub progress: Option<MoveProgress>,
+    pub report: Option<MoveReport>,
+    pub error: Option<String>,
+}
+
+static STATE: Mutex<Option<MoveState>> = Mutex::new(None);
+
+/// The running or last finished move since ClipVault started.
+pub fn status() -> Option<MoveState> {
+    locks::lock(&STATE).clone()
+}
+
+/// Changes the stored state and returns a copy of it.
+pub fn update_status(f: impl FnOnce(&mut MoveState)) -> MoveState {
+    let mut g = locks::lock(&STATE);
+    let s = g.get_or_insert_with(MoveState::default);
+    f(s);
+    s.clone()
 }
 
 /// What a move from a folder would take.
@@ -390,6 +418,16 @@ mod tests {
         let r = move_clips(&fx.db, &fx.from, &fx.to, &|_| false, &|_| Some(0), &mut |p| seen.push(p.done)).unwrap();
         assert_eq!(r.moved, 1);
         assert_eq!(seen, vec![0, 1]);
+    }
+
+    #[test]
+    fn status_keeps_the_latest_move() {
+        let _s = locks::lock(&SERIAL);
+        update_status(|s| *s = MoveState { running: true, from: "a".into(), to: "b".into(), ..Default::default() });
+        let p = MoveProgress { done: 1, total: 2, bytes_done: 5, bytes_total: 10 };
+        update_status(|s| s.progress = Some(p.clone()));
+        let s = status().unwrap();
+        assert_eq!((s.running, s.progress, s.from.as_str()), (true, Some(p), "a"));
     }
 
     #[test]

@@ -235,6 +235,16 @@ export interface MoveReport {
   cancelled: boolean;
 }
 
+/** The running or last finished clip move. */
+export interface MoveState {
+  running: boolean;
+  from: string;
+  to: string;
+  progress: MoveProgress | null;
+  report: MoveReport | null;
+  error: string | null;
+}
+
 /** Where a clip is in background compression. */
 export type CompressStage = "queued" | "encoding" | "swapping";
 
@@ -247,7 +257,8 @@ export interface EventMap {
   "compress-status": { id: string; stage: CompressStage | null };
   "mic-level": { dbfs: number };
   "import-progress": ImportProgress;
-  "move-progress": MoveProgress;
+  /** A clip move started, moved a file or ended. */
+  "move-status": MoveState;
   /** Clips moved to another folder: lists reload their paths. */
   "clips-moved": null;
   /** Main window hidden to the tray (close button) or shown again from the tray. */
@@ -356,8 +367,10 @@ export const api = {
   listAudioDevices: () => call<AudioDevice[]>("list_audio_devices"),
   /** Library clips stored directly in `from`. */
   moveClipsPreview: (from: string) => call<MovePreview>("move_clips_preview", { from }),
-  /** Moves them to `to` (files and library paths); `move-progress` while running. */
-  moveClips: (from: string, to: string) => call<MoveReport>("move_clips", { from, to }),
+  /** Starts moving them to `to` in the background; `move-status` follows. */
+  moveClips: (from: string, to: string) => call<null>("move_clips", { from, to }),
+  /** The running or last finished move; `null`: none since ClipVault started. */
+  moveStatus: () => call<MoveState | null>("move_status"),
   /** Stops a running move after the current file. */
   cancelMoveClips: () => call<null>("cancel_move_clips"),
 
