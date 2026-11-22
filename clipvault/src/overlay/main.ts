@@ -4,7 +4,7 @@
 import "./overlay.css";
 
 export interface Banner {
-  kind: "saved" | "error";
+  kind: "saving" | "saved" | "error";
   title: string;
   detail: string;
   seq: number;
@@ -22,9 +22,12 @@ const title = document.getElementById("banner-title")!;
 const detail = document.getElementById("banner-detail")!;
 
 function showBanner(b: Banner) {
+  // "Saving…" turning into its result is one banner changing state: no second slide-in.
+  const resultOfSaving = card.dataset.kind === "saving" && b.kind !== "saving";
   title.textContent = b.title;
   detail.textContent = b.detail;
   card.dataset.kind = b.kind;
+  if (resultOfSaving && card.classList.contains("in")) return;
   // Restart the entry animation for every banner, even on a reused window.
   card.classList.remove("in");
   void card.offsetWidth;

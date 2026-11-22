@@ -6,7 +6,8 @@
 //!
 //! Every save request ends in exactly one of [`saved`], [`error`] or
 //! [`not_recording`]: a toast plus a sound ("not recording" uses the error
-//! sound), so a press is never silent.
+//! sound), so a press is never silent. The hotkey path first shows
+//! [`saving`] at once, so a slow save is not mistaken for a missed press.
 use crate::capture::supervisor::Health;
 use crate::db::clips::Clip;
 
@@ -24,6 +25,8 @@ pub enum Sound {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BannerKind {
+    /// "Saving clip…": the press was heard; replaced by the result.
+    Saving,
     Saved,
     Error,
 }
@@ -70,6 +73,15 @@ pub fn saved_text(clip: &Clip, gap: bool, short: bool) -> String {
         t.push_str(" – contains gap");
     }
     t
+}
+
+/// Instant acknowledgement of a save press (before the save itself runs):
+/// banner plus tick, no toast (the result brings one). `queued`: another save
+/// is still running and this one starts after it.
+pub fn saving(ui: &dyn Ui, game: &str, queued: bool) {
+    let detail = if queued { format!("{game} · after the previous save") } else { game.to_string() };
+    ui.banner(BannerKind::Saving, "Saving clip…", &detail);
+    ui.play(Sound::Mark);
 }
 
 pub fn saved(ui: &dyn Ui, clip: &Clip, gap: bool, short: bool) {

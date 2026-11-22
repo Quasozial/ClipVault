@@ -21,6 +21,8 @@ const HEIGHT: f64 = 96.0;
 /// Logical gap to the monitor's top-right corner.
 const MARGIN: f64 = 16.0;
 const VISIBLE_FOR: Duration = Duration::from_millis(3200);
+/// Longest a "Saving clip…" banner stays up without a result.
+const SAVING_MAX: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Banner {
@@ -46,7 +48,8 @@ pub fn show(app: &AppHandle, kind: BannerKind, title: impl Into<String>, detail:
             tracing::warn!("overlay banner failed: {e}");
             return;
         }
-        std::thread::sleep(VISIBLE_FOR);
+        // "Saving…" stays until the result banner replaces it (fallback cap).
+        std::thread::sleep(if banner.kind == BannerKind::Saving { SAVING_MAX } else { VISIBLE_FOR });
         // Only the newest banner hides the window.
         if SEQ.load(Ordering::SeqCst) == banner.seq {
             let _guard = LOCK.lock().unwrap_or_else(|p| p.into_inner());

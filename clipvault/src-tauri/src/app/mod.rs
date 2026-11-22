@@ -300,6 +300,7 @@ impl AppCore {
     pub fn request_save(self: &Arc<Self>, t_press: SystemTime) {
         let me = self.clone();
         let game = self.game_name();
+        notify::saving(self.ui.as_ref(), &game, self.save.is_busy());
         self.spawn(async move {
             me.save_guarded(t_press, game).await;
         });

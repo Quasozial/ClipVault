@@ -142,6 +142,11 @@ impl SaveService {
         locks::lock(&self.infos).get(&layout).cloned().unwrap_or_else(|| locks::lock(&self.capture).clone())
     }
 
+    /// Whether a save is running right now (a new one would wait for it).
+    pub fn is_busy(&self) -> bool {
+        self.queue.try_lock().is_err()
+    }
+
     /// Waits until every save queued so far has finished (true), or `timeout`.
     pub async fn drain(&self, timeout: Duration) -> bool {
         tokio::time::timeout(timeout, self.queue.lock()).await.is_ok()
