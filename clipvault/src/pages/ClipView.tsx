@@ -149,6 +149,7 @@ export function ClipView({ id }: { id: string }) {
       (c) => {
         if (stale) return;
         wanted.current = saved.current = metaOf(c);
+        loadedSize.current = c.size;
         setClip(c);
         setTitle(c.title);
         setDescription(c.description);
@@ -174,16 +175,34 @@ export function ClipView({ id }: { id: string }) {
   // element (new `videoVersion`) loads the file again where it was.
   const [videoVersion, setVideoVersion] = useState(0);
   const resume = useRef<{ t: number; play: boolean } | null>(null);
+  // Size of the file the player has loaded: a new size means the file was
+  // replaced under it.
+  const loadedSize = useRef<number | null>(null);
   useEffect(() => {
     let live = true;
     let heard = false;
     let released = false;
     setCompressStage(null);
     setVideoVersion(0);
+    setVideoError(false);
     resume.current = null;
+    loadedSize.current = null;
+    // A fresh element loads the file again where the old one was.
+    const reload = () => {
+      const v = videoRef.current;
+      if (v && !resume.current) resume.current = { t: v.currentTime, play: !v.paused };
+      setVideoError(false);
+      setVideoVersion((n) => n + 1);
+    };
     const offClip = on("clip-updated", (c) => {
       if (c.id !== id) return;
       setClip((old) => (old ? { ...old, size: c.size, compressed: c.compressed } : c));
+      // The swap usually succeeds while the player still has the file open
+      // (no `swapping` stage): the old element would read the new file with
+      // the old one's layout and fail.
+      const before = loadedSize.current;
+      loadedSize.current = c.size;
+      if (before !== null && before !== c.size && !released) reload();
     });
     const offStage = on("compress-status", (s) => {
       if (s.id !== id) return;
@@ -198,7 +217,7 @@ export function ClipView({ id }: { id: string }) {
         v.load();
       } else if (s.stage === null && released) {
         released = false;
-        setVideoVersion((n) => n + 1);
+        reload();
       }
     });
     api.compressStatus(id).then(
