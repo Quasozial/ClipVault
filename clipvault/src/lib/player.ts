@@ -56,6 +56,11 @@ export function exportTracks(tracks: { index: number; key: string }[], volumes: 
     .filter((t) => t.volume > 0.001);
 }
 
+/** Bulk export from the library: every audio track mixed in at full volume. */
+export function allTracksMixed(tracks: { index: number }[]): ExportTrack[] {
+  return tracks.map((t) => ({ index: t.index, volume: 1 }));
+}
+
 export function exportOptions(preset: ExportPreset, tracks: ExportTrack[]): ExportOptions {
   return { label: preset.id, max_mb: preset.max_mb, height: preset.height, tracks };
 }

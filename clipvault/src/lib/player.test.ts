@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Marker } from "../api";
-import { EXPORT_PRESETS, exportOptions, exportTracks, frameStep, markerJump, stepSpeed } from "./player";
+import { allTracksMixed, EXPORT_PRESETS, exportOptions, exportTracks, frameStep, markerJump, stepSpeed } from "./player";
 
 describe("stepSpeed", () => {
   it("steps through the list and stops at the ends", () => {
@@ -59,5 +59,15 @@ describe("export options", () => {
   it("carries the preset", () => {
     const o = exportOptions(EXPORT_PRESETS[0], [{ index: 0, volume: 1 }]);
     expect(o).toEqual({ label: "discord", max_mb: 10, height: 720, tracks: [{ index: 0, volume: 1 }] });
+  });
+});
+
+describe("allTracksMixed", () => {
+  it("keeps every track at full volume", () => {
+    expect(allTracksMixed([{ index: 0 }, { index: 2 }])).toEqual([
+      { index: 0, volume: 1 },
+      { index: 2, volume: 1 },
+    ]);
+    expect(allTracksMixed([])).toEqual([]);
   });
 });

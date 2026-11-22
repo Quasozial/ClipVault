@@ -2181,3 +2181,15 @@ select.chip-more {
   object-fit: contain;
   background: #000;
 }
+
+.export-failed {
+  max-height: 160px;
+  margin: 0;
+  padding-left: 18px;
+  overflow-y: auto;
+  color: #c4c9d0;
+  font-size: 13px;
+}
+.export-failed li + li {
+  margin-top: 4px;
+}

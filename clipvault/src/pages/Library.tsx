@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, on, type Clip } from "../api";
 import { BulkBar } from "../components/BulkBar";
+import { BulkExportDialog } from "../components/BulkExportDialog";
 import { ClipCard } from "../components/ClipCard";
 import { ContextMenu, type MenuItem } from "../components/ContextMenu";
 import { FilterBar } from "../components/FilterBar";
@@ -567,6 +568,7 @@ export function Library() {
           onClose={() => setMenu(null)}
         />
       )}
+      {exporting && <BulkExportDialog clips={exporting} onClose={() => setExporting(null)} />}
       <ConfirmDialog
         open={confirmDelete !== null}
         title={confirmDelete && confirmDelete.length > 1 ? `Delete ${confirmDelete.length} clips?` : "Delete this clip?"}
