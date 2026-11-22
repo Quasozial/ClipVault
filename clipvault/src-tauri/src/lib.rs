@@ -310,6 +310,8 @@ pub fn run() {
             commands::export_trimmed,
             commands::delete_clip,
             commands::set_starred,
+            commands::set_starred_many,
+            commands::add_tags_many,
             commands::export_clip,
             commands::reveal_in_folder,
             commands::ensure_thumbnail,

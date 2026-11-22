@@ -94,6 +94,42 @@ pub fn set_starred(conn: &Connection, id: &str, starred: bool) -> Result<Clip> {
     get_clip(conn, id)
 }
 
+/// Stars or unstars many clips in one transaction. Unknown ids are skipped;
+/// returns the changed clips in the order given.
+pub fn set_starred_many(conn: &Connection, ids: &[String], starred: bool) -> Result<Vec<Clip>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut out = Vec::new();
+    for id in ids {
+        if clips::get(&tx, id)?.is_some() {
+            clips::set_starred(&tx, id, starred)?;
+            out.push(get_clip(&tx, id)?);
+        }
+    }
+    tx.commit()?;
+    Ok(out)
+}
+
+/// Adds `tags` to many clips in one transaction: existing tags keep their
+/// order and spelling, new ones follow; blanks and case-insensitive duplicates
+/// are dropped. Unknown ids are skipped; returns the changed clips.
+pub fn add_tags_many(conn: &Connection, ids: &[String], tags: &[String]) -> Result<Vec<Clip>> {
+    let tx = conn.unchecked_transaction()?;
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(c) = clips::get(&tx, id)? else { continue };
+        let mut merged = c.tags.clone();
+        for t in tags.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+            if !merged.iter().any(|m| m.eq_ignore_ascii_case(t)) {
+                merged.push(t.to_string());
+            }
+        }
+        clips::update_meta(&tx, id, &c.title, &c.description, &merged)?;
+        out.push(get_clip(&tx, id)?);
+    }
+    tx.commit()?;
+    Ok(out)
+}
+
 // ----- delete -----
 
 /// True for files ClipVault does not own (imported from SteelSeries Moments):
@@ -692,6 +728,27 @@ mod tests {
             crate::db::clips::insert(&conn, &c).unwrap();
         }
         conn
+    }
+
+    #[test]
+    fn set_starred_many_stars_only_the_given_clips() {
+        let conn = seeded();
+        let got = set_starred_many(&conn, &["a".into(), "c".into(), "nope".into()], true).unwrap();
+        assert_eq!(ids(&got), ["a", "c"]);
+        let starred = |id: &str| get_clip(&conn, id).unwrap().starred;
+        assert!(starred("a") && starred("c") && !starred("b"));
+        set_starred_many(&conn, &["a".into()], false).unwrap();
+        assert!(!starred("a"));
+    }
+
+    #[test]
+    fn add_tags_many_merges_without_case_duplicates() {
+        let conn = seeded();
+        let got = add_tags_many(&conn, &["a".into(), "c".into()], &["Clutch".into(), " ranked ".into(), "".into()]).unwrap();
+        assert_eq!(ids(&got), ["a", "c"]);
+        assert_eq!(get_clip(&conn, "a").unwrap().tags, ["clutch", "ranked"]);
+        assert_eq!(get_clip(&conn, "c").unwrap().tags, ["Clutch", "ranked"]);
+        assert_eq!(get_clip(&conn, "b").unwrap().tags, ["lol", "goal"]);
     }
 
     #[test]

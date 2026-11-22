@@ -299,6 +299,10 @@ export const api = {
   exportTrimmed: (id: string, accurate: boolean) => call<string>("export_trimmed", { id, accurate }),
   deleteClip: (id: string) => call<null>("delete_clip", { id }),
   setStarred: (id: string, starred: boolean) => call<Clip>("set_starred", { id, starred }),
+  /** One transaction; unknown ids skipped. Returns the changed clips. */
+  setStarredMany: (ids: string[], starred: boolean) => call<Clip[]>("set_starred_many", { ids, starred }),
+  /** Merges tags into every clip (case-insensitive, existing kept). Returns the changed clips. */
+  addTagsMany: (ids: string[], tags: string[]) => call<Clip[]>("add_tags_many", { ids, tags }),
   /** Re-encodes for sharing into `<capture dir>/Exports`; returns the new file's path. */
   exportClip: (id: string, options: ExportOptions) => call<string>("export_clip", { id, options }),
   revealInFolder: (path: string) => call<null>("reveal_in_folder", { path }),

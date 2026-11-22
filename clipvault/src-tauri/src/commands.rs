@@ -161,6 +161,20 @@ pub async fn set_starred(core: Core<'_>, id: String, starred: bool) -> Result<Cl
     blocking(move || library::set_starred(&crate::locks::lock(&db), &id, starred)).await
 }
 
+/// Stars or unstars many clips at once (library bulk bar); returns the changed clips.
+#[tauri::command]
+pub async fn set_starred_many(core: Core<'_>, ids: Vec<String>, starred: bool) -> Result<Vec<Clip>, String> {
+    let db = core.db();
+    blocking(move || library::set_starred_many(&crate::locks::lock(&db), &ids, starred)).await
+}
+
+/// Adds tags to many clips at once (library bulk bar); returns the changed clips.
+#[tauri::command]
+pub async fn add_tags_many(core: Core<'_>, ids: Vec<String>, tags: Vec<String>) -> Result<Vec<Clip>, String> {
+    let db = core.db();
+    blocking(move || library::add_tags_many(&crate::locks::lock(&db), &ids, &tags)).await
+}
+
 /// Recycle Bin, then the row. A file that is already gone still removes the row.
 #[tauri::command]
 pub async fn delete_clip(core: Core<'_>, id: String) -> Result<(), String> {

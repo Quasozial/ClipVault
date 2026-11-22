@@ -313,6 +313,17 @@ export function createMockBackend(): Backend {
       c.starred = Boolean(starred);
       return { ...c };
     },
+    set_starred_many: ({ ids, starred }) =>
+      clips.filter((c) => (ids as string[]).includes(c.id)).map((c) => ((c.starred = Boolean(starred)), { ...c })),
+    add_tags_many: ({ ids, tags }) =>
+      clips
+        .filter((c) => (ids as string[]).includes(c.id))
+        .map((c) => {
+          for (const t of (tags as string[]).map((t) => t.trim()).filter(Boolean)) {
+            if (!c.tags.some((x) => x.toLowerCase() === t.toLowerCase())) c.tags = [...c.tags, t];
+          }
+          return { ...c };
+        }),
     export_clip: async ({ id, options }) => {
       const c = find(id);
       const o = options as ExportOptions;
