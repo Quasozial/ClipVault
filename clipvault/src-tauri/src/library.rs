@@ -3,12 +3,11 @@
 
 use crate::db::clips::{self, Clip, ClipFilter, Marker};
 use crate::db::games::{self, Game};
-use crate::settings::Settings;
+use crate::settings::{Encoder, Settings};
 use anyhow::{anyhow, bail, Context, Result};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Mutex;
 
 // ----- listing / editing -----
@@ -225,12 +224,10 @@ pub fn ensure_thumbnail(db: &Mutex<Connection>, ffmpeg: &Path, thumbs_dir: &Path
 
 // ----- export -----
 
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-
 /// FFmpeg arguments (without the binary) for cutting `src` to `[trim_in, trim_out]`
-/// into `tmp` (written as MP4 despite the `.tmp` extension).
-pub fn export_args(src: &Path, tmp: &Path, trim_in: f64, trim_out: f64, accurate: bool) -> Vec<std::ffi::OsString> {
+/// into `tmp` (written as MP4 despite the `.tmp` extension). `reencode`: the
+/// encoder for a frame-exact cut (`None`: streams copied, cuts on keyframes).
+pub fn export_args(src: &Path, tmp: &Path, trim_in: f64, trim_out: f64, reencode: Option<Encoder>) -> Vec<std::ffi::OsString> {
     let mut a: Vec<std::ffi::OsString> = ["-y", "-hide_banner", "-loglevel", "error", "-ss"].map(Into::into).into();
     a.push(format!("{trim_in:.3}").into());
     a.push("-to".into());
@@ -238,37 +235,24 @@ pub fn export_args(src: &Path, tmp: &Path, trim_in: f64, trim_out: f64, accurate
     a.push("-i".into());
     a.push(src.into());
     a.extend(["-map", "0", "-c", "copy"].map(std::ffi::OsString::from));
-    if accurate {
-        a.extend(["-c:v", "h264_nvenc", "-rc", "vbr", "-cq", "19", "-b:v", "0", "-preset", "p5"].map(std::ffi::OsString::from));
+    if let Some(enc) = reencode {
+        a.extend(crate::export::video_rc(enc, None).into_iter().map(std::ffi::OsString::from));
     }
     a.extend(["-movflags", "+faststart", "-f", "mp4"].map(std::ffi::OsString::from));
     a.push(tmp.into());
     a
 }
 
-/// Runs FFmpeg to completion inside the kill-on-close job. Blocking.
-pub(crate) fn run_ffmpeg(ffmpeg: &Path, args: &[std::ffi::OsString]) -> Result<()> {
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::piped());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    let child = cmd.spawn().with_context(|| format!("could not run {}", ffmpeg.display()))?;
-    #[cfg(windows)]
-    {
-        use std::os::windows::io::AsRawHandle;
-        if let Err(e) = crate::capture::job::assign(child.as_raw_handle()) {
-            tracing::warn!("[export] FFmpeg not in kill-on-close job: {e}");
-        }
-    }
-    let out = child.wait_with_output().context("waiting for FFmpeg")?;
-    if !out.status.success() {
-        let line = crate::save::last_stderr_line(&String::from_utf8_lossy(&out.stderr)).unwrap_or_default();
-        bail!("FFmpeg failed ({}): {line}", out.status);
-    }
-    Ok(())
+/// Timeout for an export of `duration_s` seconds of video: generous (a CPU
+/// re-encode of a long clip is slow), but a hung FFmpeg never spins forever.
+pub fn export_timeout(duration_s: f64) -> std::time::Duration {
+    std::time::Duration::from_secs(300) + std::time::Duration::from_secs_f64(duration_s.max(0.0) * 20.0)
+}
+
+/// Runs FFmpeg to completion inside the kill-on-close job, killed after
+/// `timeout`. Blocking.
+pub(crate) fn run_ffmpeg(ffmpeg: &Path, args: &[std::ffi::OsString], timeout: std::time::Duration) -> Result<()> {
+    crate::ffmpeg_proc::run_ok(ffmpeg, args, timeout, "export").map(|_| ())
 }
 
 /// Folder for files made from `clip`: next to it, unless it is a Moments file
@@ -283,8 +267,9 @@ pub fn output_dir_for(clip: &Clip, capture_dir: &Path) -> Result<PathBuf> {
 }
 
 /// Cuts the clip's trim range into `<stem>__trim.mp4` next to it and adds it to
-/// the library as a new clip. `accurate` re-encodes the video (NVENC, frame
-/// exact); otherwise streams are copied (cuts land on keyframes). Blocking:
+/// the library as a new clip. `accurate`: re-encode the video frame-exact
+/// with this encoder setting (`Auto`: the best H.264 encoder this PC has);
+/// `None`: streams are copied (cuts land on keyframes). Blocking:
 /// call from `spawn_blocking`. Returns the new file's path.
 pub fn export_trimmed(
     db: &Mutex<Connection>,
@@ -292,7 +277,7 @@ pub fn export_trimmed(
     thumbs_dir: &Path,
     capture_dir: &Path,
     id: &str,
-    accurate: bool,
+    accurate: Option<Encoder>,
 ) -> Result<String> {
     let orig = get_clip(&crate::locks::lock(&db), id)?;
     let (t_in, t_out) = match (orig.trim_in, orig.trim_out) {
@@ -313,7 +298,8 @@ pub fn export_trimmed(
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
 
-    let result = run_ffmpeg(ffmpeg, &export_args(&orig.path, &tmp, t_in, t_out, accurate))
+    let reencode = accurate.map(|wanted| crate::export::export_encoder(ffmpeg, wanted));
+    let result = run_ffmpeg(ffmpeg, &export_args(&orig.path, &tmp, t_in, t_out, reencode), export_timeout(t_out - t_in))
         .and_then(|()| std::fs::rename(&tmp, &final_path).context("moving the exported file into place"));
     if let Err(e) = result {
         let _ = std::fs::remove_file(&tmp);
@@ -388,6 +374,11 @@ pub fn validate_settings(s: &Settings) -> Result<(), String> {
     }
     if s.capture_dir.as_os_str().to_string_lossy().trim().is_empty() {
         return Err("The clip folder must not be empty".into());
+    }
+    // Relative would resolve against the working directory, which differs
+    // between an autostart and a normal start.
+    if !s.capture_dir.is_absolute() {
+        return Err(r"The clip folder must be a full path, e.g. E:\GameClips".into());
     }
     if s.buffer_dir.as_os_str().to_string_lossy().trim().is_empty() {
         return Err("Buffer folder must not be empty".into());
@@ -899,6 +890,8 @@ mod tests {
         assert!(bad(&|s| s.bitrate_kbps = 1999).contains("itrate"));
         assert!(bad(&|s| s.bitrate_kbps = 150_001).contains("itrate"));
         assert!(bad(&|s| s.capture_dir = PathBuf::from("  ")).contains("folder"));
+        assert!(bad(&|s| s.capture_dir = PathBuf::from("GameClips")).contains("full path"));
+        assert!(bad(&|s| s.capture_dir = PathBuf::from(r"E:GameClips")).contains("full path"));
         // C2: the buffer folder is wiped of our segments on every start, so it
         // must be a real absolute folder.
         assert!(bad(&|s| s.buffer_dir = PathBuf::from("")).contains("Buffer folder"));

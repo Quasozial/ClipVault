@@ -95,7 +95,7 @@ fn export_trimmed_creates_new_clip() {
     let Some(ff) = ffmpeg() else { return };
     let (root, db, thumbs, orig) = setup(&ff);
 
-    let out = export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", false).unwrap();
+    let out = export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", None).unwrap();
     let out = PathBuf::from(out);
     assert_eq!(out.file_name().unwrap(), "Rocket-League__2026-11-20__20-00-00__trim.mp4");
     assert_eq!(out.parent(), orig.path.parent());
@@ -124,7 +124,7 @@ fn export_trimmed_creates_new_clip() {
     drop(conn);
 
     // second export does not overwrite: _2
-    let out2 = PathBuf::from(export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", false).unwrap());
+    let out2 = PathBuf::from(export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", None).unwrap());
     assert_eq!(out2.file_name().unwrap(), "Rocket-League__2026-11-20__20-00-00__trim_2.mp4");
     drop(root);
 }
@@ -135,7 +135,7 @@ fn export_trimmed_accurate_is_frame_exact() {
     let (_root, db, thumbs, _orig) = setup(&ff);
     // 5.0 s is on a keyframe in the source; use 5.4..10.4 so only a re-encode can be exact
     clips::set_trim(&db.lock().unwrap(), "orig", Some(5.4), Some(10.4)).unwrap();
-    let out = PathBuf::from(export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", true).unwrap());
+    let out = PathBuf::from(export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", Some(clipvault_lib::settings::Encoder::Auto)).unwrap());
     let (frames, fps) = probe_frames(&ff, &out);
     let secs = frames as f64 / fps;
     assert!((secs - 5.0).abs() <= 1.0 / fps + 1e-6, "accurate export {frames} frames @ {fps} = {secs}");
@@ -146,7 +146,7 @@ fn export_requires_trim() {
     let Some(ff) = ffmpeg() else { return };
     let (_root, db, thumbs, _orig) = setup(&ff);
     clips::set_trim(&db.lock().unwrap(), "orig", None, None).unwrap();
-    let e = export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", false).unwrap_err();
+    let e = export_trimmed(&db, &ff, &thumbs, &thumbs.with_file_name("captures"), "orig", None).unwrap_err();
     assert!(e.to_string().to_lowercase().contains("trim"), "{e}");
     assert_eq!(clips::list(&db.lock().unwrap(), Default::default()).unwrap().len(), 1);
 }

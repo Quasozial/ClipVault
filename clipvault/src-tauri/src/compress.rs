@@ -23,14 +23,6 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-
-/// `CREATE_NO_WINDOW | IDLE_PRIORITY_CLASS`: no console window, and FFmpeg only
-/// gets CPU time nothing else wants.
-#[cfg(windows)]
-const CREATION_FLAGS: u32 = 0x0800_0000 | 0x0000_0040;
-
 /// The result must be at most this share of the original, or it is discarded.
 const KEEP_RATIO: f64 = 0.9;
 /// Replacing a clip that is open in the player fails; retried for ~10 min.
@@ -38,8 +30,6 @@ const RENAME_ATTEMPTS: u32 = 30;
 const RENAME_RETRY: Duration = Duration::from_secs(20);
 /// How often a waiting job checks whether the game has ended.
 const BUSY_POLL: Duration = Duration::from_secs(15);
-/// How often a running encode checks whether a game started / it timed out.
-const RUN_POLL: Duration = Duration::from_millis(250);
 /// Encode timeout: this much, plus `TIMEOUT_PER_CLIP_S` seconds per clip second.
 const TIMEOUT_BASE: Duration = Duration::from_secs(600);
 const TIMEOUT_PER_CLIP_S: f64 = 30.0;
@@ -175,15 +165,7 @@ impl Compressor {
     }
 }
 
-/// How a watched FFmpeg run ended.
-#[derive(Debug)]
-pub enum Run {
-    Finished { success: bool, stderr: String },
-    /// `busy` turned true: the process was killed.
-    Busy,
-    /// Still running after the timeout: the process was killed.
-    TimedOut,
-}
+pub use crate::ffmpeg_proc::Run;
 
 pub enum Outcome {
     /// `None`: nothing to do (gone, foreign, done).
@@ -192,10 +174,9 @@ pub enum Outcome {
     Interrupted,
 }
 
-/// Runs `program` in the kill-on-close job and waits for it, killing (and
-/// reaping) it when `busy()` turns true or after `timeout`. `on_spawn` gets the
-/// pid and whether it is in the job (for tests). Spawn errors are `Finished`
-/// with `success == false`.
+/// Runs `program` at idle priority in the kill-on-close job and waits for it,
+/// killing (and reaping) it when `busy()` turns true or after `timeout`
+/// (see [`crate::ffmpeg_proc::run`]).
 pub fn run_watched(
     program: &Path,
     args: &[String],
@@ -203,58 +184,7 @@ pub fn run_watched(
     busy: &dyn Fn() -> bool,
     on_spawn: impl FnOnce(u32, bool),
 ) -> Run {
-    let mut cmd = std::process::Command::new(program);
-    cmd.args(args)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-    #[cfg(windows)]
-    cmd.creation_flags(CREATION_FLAGS);
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => return Run::Finished { success: false, stderr: format!("starting {}: {e}", program.display()) },
-    };
-    #[cfg(windows)]
-    let in_job = {
-        use std::os::windows::io::AsRawHandle;
-        let h = child.as_raw_handle();
-        if let Err(e) = crate::capture::job::assign(h) {
-            tracing::warn!("[compress] FFmpeg not in kill-on-close job: {e}");
-        }
-        crate::capture::job::in_kill_job(h)
-    };
-    #[cfg(not(windows))]
-    let in_job = false;
-    on_spawn(child.id(), in_job);
-    // Drain stderr on its own thread so a chatty FFmpeg never blocks on a full pipe.
-    let stderr = child.stderr.take().map(|mut s| {
-        std::thread::spawn(move || {
-            let mut buf = String::new();
-            let _ = std::io::Read::read_to_string(&mut s, &mut buf);
-            buf
-        })
-    });
-    let deadline = std::time::Instant::now() + timeout;
-    let stopped = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let stderr = stderr.and_then(|t| t.join().ok()).unwrap_or_default();
-                return Run::Finished { success: status.success(), stderr };
-            }
-            Ok(None) => {}
-            Err(e) => break Run::Finished { success: false, stderr: format!("waiting for FFmpeg: {e}") },
-        }
-        if busy() {
-            break Run::Busy;
-        }
-        if std::time::Instant::now() >= deadline {
-            break Run::TimedOut;
-        }
-        std::thread::sleep(RUN_POLL);
-    };
-    let _ = child.kill();
-    let _ = child.wait();
-    stopped
+    crate::ffmpeg_proc::run(program, args, timeout, crate::ffmpeg_proc::Priority::Idle, busy, on_spawn)
 }
 
 /// Removes leftovers of interrupted saves (`*.mp4.tmp`) and compressions
@@ -305,11 +235,7 @@ pub fn parse_media_info(stderr: &str) -> Option<MediaInfo> {
 /// Probes `path` with FFmpeg itself (ffprobe is not bundled). `ffmpeg -i`
 /// without an output exits non-zero but prints the input description.
 pub fn probe(ffmpeg: &Path, path: &Path) -> Option<MediaInfo> {
-    let args = vec!["-hide_banner".to_string(), "-i".to_string(), path.display().to_string()];
-    match run_watched(ffmpeg, &args, PROBE_TIMEOUT, &|| false, |_, _| {}) {
-        Run::Finished { stderr, .. } => parse_media_info(&stderr),
-        _ => None,
-    }
+    parse_media_info(&crate::ffmpeg_proc::describe(ffmpeg, path, PROBE_TIMEOUT)?)
 }
 
 /// Ok when the compressed file has the original's streams and duration.

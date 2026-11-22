@@ -120,10 +120,10 @@ pub mod tauri_backend {
             tracing::warn!("{e}");
         }
         if let Some(map) = app.try_state::<HotkeyMap>() {
-            *map.0.lock().unwrap() = ok.into_iter().collect();
+            *crate::locks::lock(&map.0) = ok.into_iter().collect();
         }
         if let Some(errs) = app.try_state::<HotkeyErrors>() {
-            *errs.0.lock().unwrap() = errors.clone();
+            *crate::locks::lock(&errs.0) = errors.clone();
         }
         errors
     }

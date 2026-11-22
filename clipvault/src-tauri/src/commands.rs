@@ -14,6 +14,7 @@ use crate::hotkeys::HotkeyError;
 use crate::library::{self, ListFilter, RlStatsInfo, RunningProcess};
 use crate::settings::Settings;
 use crate::{rl_stats, FfmpegPath};
+use anyhow::Context as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::{AppHandle, Manager, State};
@@ -111,8 +112,9 @@ pub async fn export_trimmed(
     id: String,
     accurate: bool,
 ) -> Result<String, String> {
-    let (db, thumbs, ff, cap) = (core.db(), core.thumbs_dir(), ffmpeg_of(&ffmpeg)?, core.settings().capture_dir);
-    blocking(move || library::export_trimmed(&db, &ff, &thumbs, &cap, &id, accurate)).await
+    let (db, thumbs, ff, s) = (core.db(), core.thumbs_dir(), ffmpeg_of(&ffmpeg)?, core.settings());
+    let reencode = accurate.then_some(s.encoder);
+    blocking(move || library::export_trimmed(&db, &ff, &thumbs, &s.capture_dir, &id, reencode)).await
 }
 
 /// Re-encodes the clip (trim range if set) for sharing into `<capture dir>/Exports`.
@@ -229,17 +231,29 @@ pub fn get_settings(core: Core<'_>) -> Settings {
 /// Validates, persists and applies the settings: capture restarts only when a
 /// capture-relevant field changed; hotkeys are re-registered and "start with
 /// Windows" synced. Returns the hotkeys that could not be registered (the
-/// settings are saved regardless). Sync on purpose: hotkeys register on the
-/// main thread.
+/// settings are saved regardless). The file, DB and registry work runs on a
+/// blocking thread so the main thread (which receives the save hotkey) never
+/// waits on it; only the hotkey registration is sent to the main thread.
 #[tauri::command]
-pub fn save_settings(app: AppHandle, core: Core<'_>, settings: Settings) -> Result<Vec<HotkeyError>, String> {
+pub async fn save_settings(app: AppHandle, core: Core<'_>, settings: Settings) -> Result<Vec<HotkeyError>, String> {
     library::validate_settings(&settings)?;
-    core.apply_settings(settings).map_err(|e| format!("could not save settings: {e:#}"))?;
-    let ui = TauriUi { app: app.clone() };
-    let errors = crate::apply_hotkeys(&app, &core, &ui);
-    crate::sync_autostart(&app, core.settings().start_with_windows);
-    refresh_asset_scope(&app, &core);
-    Ok(errors)
+    let core: Arc<AppCore> = core.inner().clone();
+    let (a, c) = (app.clone(), core.clone());
+    blocking(move || {
+        c.apply_settings(settings).context("could not save settings")?;
+        crate::sync_autostart(&a, c.settings().start_with_windows);
+        refresh_asset_scope(&a, &c);
+        Ok(())
+    })
+    .await?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let (a, c) = (app.clone(), core.clone());
+    app.run_on_main_thread(move || {
+        let ui = TauriUi { app: a.clone() };
+        let _ = tx.send(crate::apply_hotkeys(&a, &c, &ui));
+    })
+    .map_err(|e| format!("could not register hotkeys: {e}"))?;
+    rx.await.map_err(|_| "could not register hotkeys".to_string())
 }
 
 /// One encoder choice for the Settings page.

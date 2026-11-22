@@ -102,7 +102,7 @@ pub fn build(app: &AppHandle, core: Arc<AppCore>) -> tauri::Result<()> {
         })
         .build(app)?;
     if let Some(h) = app.try_state::<TrayHandle>() {
-        *h.0.lock().unwrap() = Some(Tray { icon, desktop });
+        *crate::locks::lock(&h.0) = Some(Tray { icon, desktop });
     }
     Ok(())
 }
@@ -111,7 +111,7 @@ pub fn build(app: &AppHandle, core: Arc<AppCore>) -> tauri::Result<()> {
 /// any tray call (those block on the main thread when called from elsewhere).
 fn handles(app: &AppHandle) -> Option<Tray> {
     let h = app.try_state::<TrayHandle>()?;
-    let t = h.0.lock().unwrap().clone();
+    let t = crate::locks::lock(&h.0).clone();
     t
 }
 

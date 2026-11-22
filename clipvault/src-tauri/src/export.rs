@@ -114,7 +114,7 @@ pub fn export_encoder(ffmpeg: &Path, wanted: Encoder) -> Encoder {
 }
 
 /// Video rate control arguments: a bitrate (capped exports) or constant quality.
-fn video_rc(enc: Encoder, video_kbps: Option<u32>) -> Vec<String> {
+pub(crate) fn video_rc(enc: Encoder, video_kbps: Option<u32>) -> Vec<String> {
     let codec = h264_codec(enc);
     let mut a: Vec<String> = vec!["-c:v".into(), codec.into()];
     let s = |v: &[&str]| v.iter().map(|x| x.to_string()).collect::<Vec<_>>();
@@ -207,7 +207,7 @@ pub fn export_clip(ffmpeg: &Path, clip: &Clip, capture_dir: &Path, enc: Encoder,
                 None => None,
             };
             let args = export_args(&clip.path, &tmp, t_in, t_out, clip.height, opts, enc, vk);
-            crate::library::run_ffmpeg(ffmpeg, &args)?;
+            crate::library::run_ffmpeg(ffmpeg, &args, crate::library::export_timeout(duration))?;
             let size = std::fs::metadata(&tmp).map(|m| m.len()).unwrap_or(0);
             match opts.max_mb {
                 Some(mb) if size as f64 > mb * MB => {

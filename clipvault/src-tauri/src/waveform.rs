@@ -5,9 +5,9 @@
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Peak buckets per second of audio.
 pub const PEAKS_PER_SEC: f64 = 50.0;
@@ -19,8 +19,6 @@ const EXTRACT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Total size of cached per-track audio; the least recently opened clips'
 /// tracks are evicted beyond it (they are re-extracted when opened again).
 pub const CACHE_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-#[cfg(windows)]
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioTrack {
@@ -121,48 +119,17 @@ fn display_order(kind: &str) -> u8 {
     }
 }
 
-fn hide(cmd: &mut Command) {
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-    #[cfg(not(windows))]
-    let _ = cmd;
-}
-
-fn run(mut cmd: Command, what: &str) -> Result<String> {
-    hide(&mut cmd);
-    let mut child = cmd
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("could not run FFmpeg for {what}"))?;
-    let mut err = child.stderr.take().unwrap();
-    let reader = std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = std::io::Read::read_to_string(&mut err, &mut s);
-        s
-    });
-    let started = Instant::now();
-    let status = loop {
-        if let Some(st) = child.try_wait()? {
-            break st;
+/// Runs FFmpeg (see [`crate::ffmpeg_proc`]); a probe's non-zero exit is fine.
+fn run(ffmpeg: &Path, args: &[OsString], what: &str) -> Result<String> {
+    use crate::ffmpeg_proc::{run, Priority, Run};
+    match run(ffmpeg, args, EXTRACT_TIMEOUT, Priority::Normal, &|| false, |_, _| {}) {
+        Run::Finished { success, stderr } if success || what == "probe" => Ok(stderr),
+        Run::Finished { stderr, .. } => {
+            let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+            Err(anyhow!("FFmpeg {what} failed: {last}"))
         }
-        if started.elapsed() > EXTRACT_TIMEOUT {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!("{what} timed out"));
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let stderr = reader.join().unwrap_or_default();
-    if !status.success() && what != "probe" {
-        let last = stderr.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
-        return Err(anyhow!("FFmpeg {what} failed ({status}): {last}"));
+        _ => Err(anyhow!("{what} timed out")),
     }
-    Ok(stderr)
 }
 
 fn stamp(p: &Path) -> (u64, u64) {
@@ -202,9 +169,8 @@ pub fn audio_tracks(ffmpeg: &Path, video: &Path, cache_dir: &Path, id: &str) -> 
     }
     std::fs::create_dir_all(cache_dir).with_context(|| format!("cannot create {}", cache_dir.display()))?;
 
-    let mut probe = Command::new(ffmpeg);
-    probe.args(["-hide_banner", "-i"]).arg(video);
-    let titles = parse_audio_streams(&run(probe, "probe")?);
+    let probe: Vec<OsString> = vec!["-hide_banner".into(), "-i".into(), video.into()];
+    let titles = parse_audio_streams(&run(ffmpeg, &probe, "probe")?);
     if titles.is_empty() {
         return Ok(Vec::new());
     }
@@ -212,14 +178,15 @@ pub fn audio_tracks(ffmpeg: &Path, video: &Path, cache_dir: &Path, id: &str) -> 
     // One pass: per track an m4a (stream copy) and a mono 8 kHz raw envelope source.
     let m4a = |n: usize| cache_dir.join(format!("{safe}.a{n}.m4a"));
     let raw = |n: usize| cache_dir.join(format!("{safe}.a{n}.f32"));
-    let mut cmd = Command::new(ffmpeg);
-    cmd.args(["-y", "-hide_banner", "-loglevel", "error", "-i"]).arg(video);
+    let mut args: Vec<OsString> = ["-y", "-hide_banner", "-loglevel", "error", "-i"].map(OsString::from).into();
+    args.push(video.into());
     for n in 0..titles.len() {
-        cmd.args(["-map", &format!("0:a:{n}"), "-vn", "-c:a", "copy", "-f", "mp4"]).arg(m4a(n));
-        cmd.args(["-map", &format!("0:a:{n}"), "-vn", "-ac", "1", "-ar", &ENVELOPE_RATE.to_string(), "-f", "f32le"])
-            .arg(raw(n));
+        args.extend(["-map", &format!("0:a:{n}"), "-vn", "-c:a", "copy", "-f", "mp4"].map(OsString::from));
+        args.push(m4a(n).into());
+        args.extend(["-map", &format!("0:a:{n}"), "-vn", "-ac", "1", "-ar", &ENVELOPE_RATE.to_string(), "-f", "f32le"].map(OsString::from));
+        args.push(raw(n).into());
     }
-    run(cmd, "audio extraction")?;
+    run(ffmpeg, &args, "audio extraction")?;
 
     let mut tracks = Vec::with_capacity(titles.len());
     for (n, title) in titles.iter().enumerate() {

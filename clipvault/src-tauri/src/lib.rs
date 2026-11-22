@@ -6,6 +6,7 @@ pub mod compress;
 pub mod db;
 pub mod events;
 pub mod export;
+pub mod ffmpeg_proc;
 pub mod game_watcher;
 pub mod hotkeys;
 pub mod import_moments;
@@ -83,7 +84,7 @@ fn get_health(core: State<'_, Arc<AppCore>>) -> HealthPayload {
 
 #[tauri::command]
 fn get_hotkey_errors(errors: State<'_, HotkeyErrors>) -> Vec<HotkeyError> {
-    errors.0.lock().unwrap().clone()
+    crate::locks::lock(&errors.0).clone()
 }
 
 #[cfg(test)]
@@ -111,9 +112,12 @@ mod startup_tests {
 }
 
 /// The Settings page reports whether it is open (mic level meter).
+/// Starting/stopping the mic probe opens a WASAPI device: done on a blocking
+/// thread, never on the main thread that receives the save hotkey.
 #[tauri::command]
-fn set_settings_open(core: State<'_, Arc<AppCore>>, open: bool) {
-    core.set_settings_open(open);
+async fn set_settings_open(core: State<'_, Arc<AppCore>>, open: bool) -> Result<(), String> {
+    let core = core.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || core.set_settings_open(open)).await.map_err(|e| e.to_string())
 }
 
 /// FFmpeg path for commands that need it (Moments import thumbnails).
@@ -181,7 +185,7 @@ async fn import_moments(
 }
 
 fn on_hotkey(app: &AppHandle, id: u32, t_press: SystemTime) {
-    let Some(action) = app.state::<HotkeyMap>().0.lock().unwrap().get(&id).copied() else { return };
+    let Some(action) = crate::locks::lock(&app.state::<HotkeyMap>().0).get(&id).copied() else { return };
     let Some(core) = app.try_state::<Arc<AppCore>>() else { return };
     tracing::info!("hotkey: {}", action.label());
     match action {

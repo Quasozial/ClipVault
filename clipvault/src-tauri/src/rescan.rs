@@ -14,7 +14,7 @@
 //! * `may_compress == false` marks them compressed so background compression
 //!   never rewrites them: without a backup to tell, a file could be a Moments
 //!   clip, which ClipVault must not write.
-use crate::compress::{parse_media_info, run_watched, Run};
+use crate::compress::parse_media_info;
 use crate::db::clips::{self, Clip, ClipFilter};
 use crate::locks;
 use anyhow::Result;
@@ -90,11 +90,7 @@ pub fn rescan(db: &Mutex<Connection>, ffmpeg: &Path, dir: &Path, since: Option<S
                 continue;
             }
         }
-        let args = vec!["-hide_banner".to_string(), "-i".to_string(), path.display().to_string()];
-        let stderr = match run_watched(ffmpeg, &args, PROBE_TIMEOUT, &|| false, |_, _| {}) {
-            Run::Finished { stderr, .. } => stderr,
-            _ => continue,
-        };
+        let Some(stderr) = crate::ffmpeg_proc::describe(ffmpeg, &path, PROBE_TIMEOUT) else { continue };
         let Some(info) = parse_media_info(&stderr) else {
             tracing::warn!("[rescan] {}: not a readable video, skipped", path.display());
             continue;
