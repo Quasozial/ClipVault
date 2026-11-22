@@ -4,7 +4,12 @@ import type { Clip, ClipFilter, SortOrder } from "../api";
 export function matchesFilter(clip: Clip, filter: ClipFilter): boolean {
   if (filter.game && clip.game !== filter.game) return false;
   if (filter.starred && !clip.starred) return false;
-  const words = (filter.search ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+  return matchesSearch(clip, filter.search ?? "");
+}
+
+/** Every whitespace-separated word must appear (case-insensitive) in the title, description, a tag, the game, the date or a marker's label or kind. */
+export function matchesSearch(clip: Clip, search: string): boolean {
+  const words = search.toLowerCase().split(/\s+/).filter(Boolean);
   if (words.length === 0) return true;
   const fields = [
     clip.title,
