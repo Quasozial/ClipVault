@@ -441,6 +441,13 @@ export function createMockBackend(): Backend {
       { id: "\\\\.\\DISPLAY1", output_idx: 0, width: 2560, height: 1440, refresh_hz: 165, primary: true, hdr: true },
       { id: "\\\\.\\DISPLAY2", output_idx: 1, width: 1920, height: 1080, refresh_hz: 60, primary: false, hdr: false },
     ],
+    storage_info: () => ({
+      total: 2_000_000_000_000,
+      free: 1_210_000_000_000,
+      clips_bytes: clips.reduce((a, c) => a + c.size, 0),
+      clip_count: clips.length,
+    }),
+    pick_folder: () => "D:\\Clips",
     move_clips_preview: ({ from }) => {
       const inDir = clips.filter((c) => c.path.slice(0, c.path.lastIndexOf("\\")).toLowerCase() === String(from).toLowerCase());
       return { count: inDir.length, bytes: inDir.reduce((a, c) => a + c.size, 0) };

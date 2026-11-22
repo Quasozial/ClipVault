@@ -287,6 +287,50 @@ pub async fn save_settings(app: AppHandle, core: Core<'_>, settings: Settings) -
     rx.await.map_err(|_| "could not register hotkeys".to_string())
 }
 
+// ----- storage -----
+
+/// Disk use for the Clips & storage page.
+#[derive(serde::Serialize)]
+pub struct StorageInfo {
+    /// Volume holding the clip folder.
+    pub total: u64,
+    pub free: u64,
+    /// All library clips (wherever they are stored).
+    pub clips_bytes: u64,
+    pub clip_count: u64,
+}
+
+/// Disk space of the volume holding `dir` and the library's size.
+#[tauri::command]
+pub async fn storage_info(core: Core<'_>, dir: String) -> Result<StorageInfo, String> {
+    let db = core.db();
+    blocking(move || {
+        let (free, total) = crate::disk::space(Path::new(&dir)).with_context(|| format!("could not read the disk space of {dir}"))?;
+        let (clip_count, clips_bytes) = crate::db::clips::totals(&crate::locks::lock(&db))?;
+        Ok(StorageInfo { total, free, clips_bytes, clip_count })
+    })
+    .await
+}
+
+/// Windows folder picker; `null` when cancelled.
+#[tauri::command]
+pub async fn pick_folder(app: AppHandle, start: Option<String>) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let mut d = app.dialog().file().set_title("Choose the clip folder");
+    if let Some(s) = start.filter(|s| Path::new(s).is_dir()) {
+        d = d.set_directory(s);
+    }
+    if let Some(w) = app.get_webview_window("main") {
+        d = d.set_parent(&w);
+    }
+    let picked = tauri::async_runtime::spawn_blocking(move || d.blocking_pick_folder())
+        .await
+        .map_err(|e| format!("folder picker failed: {e}"))?;
+    picked
+        .map(|p| p.into_path().map(|p| p.display().to_string()).map_err(|e| format!("{e}")))
+        .transpose()
+}
+
 // ----- moving clips to another folder -----
 
 /// How many library clips are stored directly in `from`, and their size.

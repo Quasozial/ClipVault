@@ -13,17 +13,33 @@ import {
   type RlStatsInfo,
   type RunningProcess,
   type Settings as SettingsT,
+  type StorageInfo,
 } from "../api";
 import { HotkeyRecorder } from "../components/HotkeyRecorder";
 import { MicMeter } from "../components/MicMeter";
 import { MoveClipsDialog, MoveStatusPanel } from "../components/MoveClipsDialog";
 import { ConfirmDialog, Toggle } from "../components/ui";
+import {
+  bitrateFor,
+  clipSizeEstimate,
+  diskShares,
+  FRAME_RATES,
+  LENGTHS,
+  QUALITIES,
+  qualityOf,
+  RESOLUTIONS,
+  withFormat,
+  withLength,
+  type Quality,
+} from "../lib/clipStorage";
+import { formatBytes } from "../lib/format";
 import { settingsOpenSync } from "../lib/settingsOpen";
 import { rebaseSettings } from "../lib/settingsMerge";
 import { moveRunning, startImport, useImport } from "../lib/stores";
 import { reportError, toast } from "../lib/toast";
 
 const SECTIONS = [
+  ["storage", "Clips & storage"],
   ["capture", "Capture"],
   ["audio", "Audio"],
   ["video", "Video"],
@@ -73,6 +89,170 @@ function Row(props: { label: ReactNode; hint?: ReactNode; children: ReactNode; h
 
 function displayLabel(d: DisplayInfo, i: number) {
   return `Display ${i + 1}${d.primary ? " (primary)" : ""}, ${d.width}×${d.height} at ${d.refresh_hz} Hz${d.hdr ? ", HDR" : ""}`;
+}
+
+// ----- clips & storage -----
+
+function Pick(props: { id: string; label: string; value: string | number; onChange(v: string): void; children: ReactNode }) {
+  return (
+    <label className="cs-pick" htmlFor={props.id}>
+      <span>{props.label}</span>
+      <select id={props.id} value={props.value} onChange={(e) => props.onChange(e.target.value)}>
+        {props.children}
+      </select>
+    </label>
+  );
+}
+
+/** Clip format choices with a size estimate, the clip drive's space and the clip folder. */
+function StorageSection(props: { draft: SettingsT; onChange(next: SettingsT): void }) {
+  const { draft, onChange } = props;
+  const [info, setInfo] = useState<StorageInfo | null>(null);
+  const [infoError, setInfoError] = useState<string | null>(null);
+  const [picking, setPicking] = useState(false);
+  const dir = draft.capture_dir;
+
+  const load = useCallback(() => {
+    api.storageInfo(dir).then(
+      (i) => {
+        setInfo(i);
+        setInfoError(null);
+      },
+      (e) => setInfoError(e instanceof Error ? e.message : String(e)),
+    );
+  }, [dir]);
+  useEffect(load, [load]);
+  useEffect(() => on("clip-saved", load), [load]);
+  useEffect(() => on("clip-updated", load), [load]);
+  useEffect(() => on("clips-moved", load), [load]);
+
+  const length = Math.min(draft.save_length_s, draft.max_save_length_s);
+  const quality = qualityOf(draft.bitrate_kbps, draft.output_height, draft.fps);
+  const estimate = clipSizeEstimate(draft);
+  const shares = info ? diskShares(info.total, info.free, info.clips_bytes) : null;
+  const pct = (x: number) => `${(x * 100).toFixed(2)}%`;
+
+  const pick = async () => {
+    setPicking(true);
+    try {
+      const folder = await api.pickFolder(dir);
+      if (folder) onChange({ ...draft, capture_dir: folder });
+    } catch (e) {
+      reportError("Could not open the folder picker", e);
+    } finally {
+      setPicking(false);
+    }
+  };
+
+  return (
+    <section className="s-section" id="s-storage" aria-labelledby="s-storage-h">
+      <h2 id="s-storage-h">Clips & storage</h2>
+      <p className="s-intro">Higher settings make better-looking clips. Lower settings go easier on your PC and make smaller files.</p>
+
+      <div className="cs-picks">
+        <Pick id="cs-len" label="Length" value={length} onChange={(v) => onChange(withLength(draft, Number(v)))}>
+          {!LENGTHS.some(([sec]) => sec === length) && <option value={length}>{length} seconds</option>}
+          {LENGTHS.map(([sec, l]) => (
+            <option key={sec} value={sec}>
+              {l}
+            </option>
+          ))}
+        </Pick>
+        <Pick
+          id="cs-q"
+          label="Video quality"
+          value={quality ?? "custom"}
+          onChange={(v) =>
+            v !== "custom" && onChange({ ...draft, bitrate_kbps: bitrateFor(v as Quality, draft.output_height, draft.fps) })
+          }
+        >
+          {QUALITIES.map(([q, l]) => (
+            <option key={q} value={q}>
+              {l}
+            </option>
+          ))}
+          {!quality && <option value="custom">Custom ({Math.round(draft.bitrate_kbps / 1000)} Mbit/s)</option>}
+        </Pick>
+        <Pick id="cs-res" label="Resolution" value={draft.output_height} onChange={(v) => onChange(withFormat(draft, Number(v), draft.fps))}>
+          {RESOLUTIONS.map((h) => (
+            <option key={h} value={h}>
+              {h}p{h === 1080 ? " (default)" : ""}
+            </option>
+          ))}
+        </Pick>
+        <Pick id="cs-fps" label="FPS" value={draft.fps} onChange={(v) => onChange(withFormat(draft, draft.output_height, Number(v)))}>
+          {FRAME_RATES.map((f) => (
+            <option key={f} value={f}>
+              {f}
+              {f === 60 ? " (default)" : ""}
+            </option>
+          ))}
+        </Pick>
+      </div>
+      <p className="cs-estimate">
+        Estimated clip size: <b>up to {formatBytes(estimate)}</b> per clip
+        <small>Recording uses only the bitrate a scene needs, so most clips come out smaller.</small>
+      </p>
+
+      <h3 className="cs-h">Disk space</h3>
+      {infoError && (
+        <p className="field-error" role="alert">
+          {infoError}
+        </p>
+      )}
+      {!info && !infoError && <p className="muted">Reading disk space…</p>}
+      {info && shares && (
+        <div className="cs-disk">
+          <div className="cs-disk-top">
+            <div>
+              <b>{formatBytes(info.free)}</b>
+              <small>free of {formatBytes(info.total)}</small>
+            </div>
+            <small>{Math.round(shares.used * 100)}% used</small>
+          </div>
+          <div
+            className="cs-bar"
+            role="img"
+            aria-label={`ClipVault clips ${formatBytes(info.clips_bytes)}, ${formatBytes(info.free)} free of ${formatBytes(info.total)}`}
+          >
+            <span className="cs-fill-clips" style={{ width: pct(shares.clips) }} />
+            <span className="cs-fill-other" style={{ width: pct(shares.other) }} />
+          </div>
+          <div className="cs-legend">
+            <span>
+              <i className="cs-dot cs-fill-clips" /> ClipVault: <b>{formatBytes(info.clips_bytes)}</b> ({info.clip_count}{" "}
+              {info.clip_count === 1 ? "clip" : "clips"})
+            </span>
+            <span>
+              <i className="cs-dot cs-fill-other" /> Rest of the PC: <b>{formatBytes(Math.max(0, info.total - info.free - info.clips_bytes))}</b>
+            </span>
+            <span className="cs-legend-end">
+              Room for about <b>{estimate > 0 ? Math.floor(info.free / estimate).toLocaleString() : "–"}</b> more clips
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="cs-location">
+        <div className="cs-location-text">
+          <span className="cs-location-label">Clip folder</span>
+          <button
+            type="button"
+            className="cs-path"
+            title="Show in Explorer"
+            onClick={() => void api.revealInFolder(dir).catch((e) => reportError("Could not open the folder", e))}
+          >
+            {dir}
+          </button>
+        </div>
+        <button type="button" className="btn" disabled={picking} onClick={() => void pick()}>
+          {picking ? "Choosing…" : "Change location"}
+        </button>
+      </div>
+      <p className="cs-location-hint">Takes effect when you save. ClipVault then offers to move your clips from the old folder.</p>
+      <MoveStatusPanel />
+    </section>
+  );
 }
 
 // ----- games -----
@@ -517,27 +697,15 @@ export function Settings({ section }: { section?: string }) {
       </nav>
 
       <div className="s-body">
+        <StorageSection
+          draft={draft}
+          onChange={(next) => {
+            setDraft(next);
+            setSaveError(null);
+          }}
+        />
         <Section id="capture" title="Capture">
-          <Row label="Frame rate" htmlFor="fps">
-            <select id="fps" value={draft.fps} onChange={(e) => set("fps", Number(e.target.value))}>
-              <option value={60}>60 fps</option>
-              <option value={30}>30 fps</option>
-            </select>
-          </Row>
-          <Row label="Clip length" hint={`How much is kept when you press Save. 5 to ${draft.max_save_length_s} seconds.`} htmlFor="len">
-            <div className="with-unit">
-              <input
-                id="len"
-                type="number"
-                min={5}
-                max={draft.max_save_length_s}
-                value={draft.save_length_s}
-                onChange={(e) => set("save_length_s", Number(e.target.value))}
-              />
-              <span>s</span>
-            </div>
-          </Row>
-          <Row label="Longest clip" hint="Upper limit for the clip length; up to 600 seconds." htmlFor="maxlen">
+          <Row label="Longest clip" hint="Upper limit for the clip length (set under Clips & storage); up to 600 seconds." htmlFor="maxlen">
             <div className="with-unit">
               <input
                 id="maxlen"
@@ -605,10 +773,6 @@ export function Settings({ section }: { section?: string }) {
           <Row label="Desktop capture" hint="Record the desktop when no game is running. Also on the hotkey and the tray menu.">
             <Toggle checked={draft.desktop_capture} onChange={(v) => set("desktop_capture", v)} label={draft.desktop_capture ? "On" : "Off"} />
           </Row>
-          <Row label="Clip folder" hint="Saved clips go here. After a change, ClipVault offers to move your clips from the old folder." htmlFor="cdir">
-            <input id="cdir" className="path-input" value={draft.capture_dir} onChange={(e) => set("capture_dir", e.target.value)} spellCheck={false} />
-            <MoveStatusPanel />
-          </Row>
           <Row
             label="Compress saved clips"
             hint="Re-encodes clips to AV1 in the background, usually a third of the size or less. Waits while a game is recording."
@@ -662,15 +826,6 @@ export function Settings({ section }: { section?: string }) {
         </Section>
 
         <Section id="video" title="Video">
-          <Row label="Output resolution" htmlFor="res">
-            <select id="res" value={draft.output_height} onChange={(e) => set("output_height", Number(e.target.value))}>
-              {[720, 1080, 1440, 2160].map((h) => (
-                <option key={h} value={h}>
-                  {h}p
-                </option>
-              ))}
-            </select>
-          </Row>
           <Row label="HDR" hint="Read from Windows for the recorded monitor.">
             <span className="value">
               {monitor ? (

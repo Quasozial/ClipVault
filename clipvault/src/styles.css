@@ -1775,6 +1775,155 @@ select.chip-more {
   gap: 10px;
   flex-wrap: wrap;
 }
+/* Clips & storage */
+.cs-picks {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 16px;
+}
+.cs-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.cs-pick > span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.cs-pick select {
+  width: 100%;
+  min-width: 0;
+}
+.cs-estimate {
+  margin: 14px 0 0;
+}
+.cs-estimate small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 16px;
+}
+.cs-h {
+  margin: 28px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--muted);
+}
+.cs-disk-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-end;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.cs-disk-top b {
+  font-size: 16px;
+  font-variant-numeric: tabular-nums;
+}
+.cs-disk-top small {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+}
+.cs-bar {
+  display: flex;
+  height: 10px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--raise);
+}
+.cs-bar > span {
+  height: 100%;
+  min-width: 0;
+}
+.cs-fill-clips {
+  background: var(--accent);
+}
+.cs-fill-other {
+  background: #6f8fb8;
+}
+.cs-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 20px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--muted);
+}
+.cs-legend b {
+  color: var(--text);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.cs-legend-end {
+  margin-left: auto;
+}
+.cs-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: 0;
+}
+.cs-location {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 24px;
+  padding: 16px 20px;
+  background: var(--surface);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--r-m);
+}
+.cs-location-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.cs-location-label {
+  font-weight: 600;
+}
+.cs-path {
+  all: unset;
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--muted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cs-path:hover {
+  color: var(--text);
+}
+.cs-path:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.cs-location > .btn {
+  flex: none;
+}
+.cs-location-hint {
+  margin: 6px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+#s-storage .move-status {
+  max-width: none;
+}
+@media (max-width: 760px) {
+  .cs-picks {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 .notice {
   margin: 0 0 4px;
   padding: 8px 12px;

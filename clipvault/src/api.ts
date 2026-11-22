@@ -245,6 +245,16 @@ export interface MoveState {
   error: string | null;
 }
 
+/** Disk use shown on the Clips & storage page. */
+export interface StorageInfo {
+  /** Drive holding the clip folder. */
+  total: number;
+  free: number;
+  /** All library clips. */
+  clips_bytes: number;
+  clip_count: number;
+}
+
 /** Where a clip is in background compression. */
 export type CompressStage = "queued" | "encoding" | "swapping";
 
@@ -365,6 +375,10 @@ export const api = {
   listDisplays: () => call<DisplayInfo[]>("list_displays"),
   listEncoders: () => call<EncoderList>("list_encoders"),
   listAudioDevices: () => call<AudioDevice[]>("list_audio_devices"),
+  /** Disk space of the drive holding `dir`, and the library's size. */
+  storageInfo: (dir: string) => call<StorageInfo>("storage_info", { dir }),
+  /** Windows folder picker; `null` when cancelled. */
+  pickFolder: (start: string | null) => call<string | null>("pick_folder", { start }),
   /** Library clips stored directly in `from`. */
   moveClipsPreview: (from: string) => call<MovePreview>("move_clips_preview", { from }),
   /** Starts moving them to `to` in the background; `move-status` follows. */

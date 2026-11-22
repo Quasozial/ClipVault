@@ -27,26 +27,38 @@ pub fn free_bytes(path: &Path) -> std::io::Result<u64> {
             std::io::Error::new(std::io::ErrorKind::NotFound, format!("no existing folder above {}", path.display()))
         })?;
     }
-    free_bytes_of_existing(p)
+    Ok(space_of_existing(p)?.0)
+}
+
+/// `(free, total)` bytes of the volume holding `path` (nearest existing
+/// ancestor, as in [`free_bytes`]).
+pub fn space(path: &Path) -> std::io::Result<(u64, u64)> {
+    let mut p = path;
+    while !p.exists() {
+        p = p.parent().ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::NotFound, format!("no existing folder above {}", path.display()))
+        })?;
+    }
+    space_of_existing(p)
 }
 
 #[cfg(windows)]
-fn free_bytes_of_existing(path: &Path) -> std::io::Result<u64> {
+fn space_of_existing(path: &Path) -> std::io::Result<(u64, u64)> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::PCWSTR;
     use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 
     let wide: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    let mut available = 0u64;
-    // SAFETY: `wide` is NUL-terminated and outlives the call; the out pointer
-    // is a valid u64.
-    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut available), None, None) }
+    let (mut available, mut total) = (0u64, 0u64);
+    // SAFETY: `wide` is NUL-terminated and outlives the call; the out pointers
+    // are valid u64s.
+    unsafe { GetDiskFreeSpaceExW(PCWSTR(wide.as_ptr()), Some(&mut available), Some(&mut total), None) }
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    Ok(available)
+    Ok((available, total))
 }
 
 #[cfg(not(windows))]
-fn free_bytes_of_existing(_path: &Path) -> std::io::Result<u64> {
+fn space_of_existing(_path: &Path) -> std::io::Result<(u64, u64)> {
     Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "free space probe is Windows-only"))
 }
 
@@ -171,5 +183,7 @@ mod tests {
         let missing = dir.path().join("not").join("yet");
         let free2 = free_bytes(&missing).unwrap();
         assert!(free2 > 0);
+        let (f, total) = space(dir.path()).unwrap();
+        assert!(f > 0 && total >= f);
     }
 }

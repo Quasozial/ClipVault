@@ -371,6 +371,12 @@ pub fn delete_rows(conn: &Connection, id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Number of clips in the library and their total size on disk.
+pub fn totals(conn: &Connection) -> Result<(u64, u64)> {
+    let (n, bytes): (i64, i64) = conn.query_row("SELECT COUNT(*), COALESCE(SUM(size), 0) FROM clips", [], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    Ok((n as u64, bytes as u64))
+}
+
 /// Paths of every clip in the library.
 pub fn all_paths(conn: &Connection) -> Result<Vec<PathBuf>> {
     let mut st = conn.prepare("SELECT path FROM clips")?;

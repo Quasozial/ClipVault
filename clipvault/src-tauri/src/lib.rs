@@ -242,6 +242,7 @@ pub fn run() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -328,6 +329,8 @@ pub fn run() {
             commands::list_encoders,
             commands::compress_clip,
             commands::compress_status,
+            commands::storage_info,
+            commands::pick_folder,
             commands::move_clips_preview,
             commands::move_clips,
             commands::cancel_move_clips,
