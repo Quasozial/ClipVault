@@ -1,18 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { api, on, type Clip, type ClipFilter, type MarkerKind, type SortOrder } from "../api";
-import { MarkerIcon, MARKER_NAMES } from "../components/MarkerIcon";
-import { StarIcon } from "../components/StarIcon";
-import { Thumb } from "../components/Thumb";
-import { insertClip, matchesFilter } from "../lib/clips";
-import { formatDuration, formatTakenAt } from "../lib/format";
-import { columnsFor, visibleRows } from "../lib/grid";
-import { href, startImport, useImport } from "../lib/stores";
+import { api, on, type Clip } from "../api";
+import { ClipCard } from "../components/ClipCard";
+import { FilterBar } from "../components/FilterBar";
+import { insertClip } from "../lib/clips";
+import { groupByDate } from "../lib/dateGroups";
+import { buildLayout, columnsFor, headingAt, visibleRange } from "../lib/grid";
+import { applyView, EMPTY_FILTER, facetCounts, isFiltered, type LibraryFilter, type LibrarySort } from "../lib/libraryView";
+import { startImport, useImport } from "../lib/stores";
 import { reportError } from "../lib/toast";
 
 /**
- * The library loads the full clip list in one `list_clips` call (the command has
- * no paging; 630 rows of metadata is small) and renders only the rows in view
- * (row virtualisation below). Thumbnails are fetched per card once visible.
+ * The library loads the whole clip list in one `list_clips` call and searches,
+ * filters, counts and sorts it client-side (`lib/libraryView`), so chips show
+ * live counts and filtering is instant. Only rows in view are rendered (row
+ * virtualisation over `lib/grid` layout rows). Thumbnails load per card once visible.
  */
 
 // Big cards, 3-4 per row on typical windows (fewer only when narrow).
@@ -20,77 +21,24 @@ const MIN_CARD = 300;
 const MAX_COLS = 4;
 const GAP = 20; // keep in sync with .grid-row gap
 const INFO_H = 60; // title + meta under the 16:9 thumbnail (keep in sync with .card-info)
+const HEADING_H = 44; // keep in sync with .group-heading
+const PAD = 24;
 const BANNER_KEY = "clipvault.importBannerDismissed";
 
+const SORTS: [LibrarySort, string][] = [
+  ["newest", "Newest first"],
+  ["oldest", "Oldest first"],
+  ["longest", "Longest"],
+  ["largest", "Largest"],
+  ["markers", "Most markers"],
+];
+
 // Kept across visits so "back" from a clip lands where you were.
-const remembered: { search: string; game: string; starred: boolean; sort: SortOrder; scrollTop: number } = {
-  search: "",
-  game: "",
-  starred: false,
+const remembered: { filter: LibraryFilter; sort: LibrarySort; scrollTop: number } = {
+  filter: EMPTY_FILTER,
   sort: "newest",
   scrollTop: 0,
 };
-
-const MARKER_ORDER: MarkerKind[] = ["goal", "laugh", "manual", "saved", "imported"];
-
-function markerSummary(clip: Clip) {
-  const counts = new Map<MarkerKind, number>();
-  for (const m of clip.markers) if (m.kind !== "saved") counts.set(m.kind, (counts.get(m.kind) ?? 0) + 1);
-  return MARKER_ORDER.filter((k) => counts.has(k)).map((k) => ({ kind: k, n: counts.get(k)! }));
-}
-
-function ClipCard({ clip, root, onStar }: { clip: Clip; root: Element | null; onStar(c: Clip): void }) {
-  const trimmed = clip.trim_in !== null || clip.trim_out !== null;
-  const markers = markerSummary(clip);
-  return (
-    <a className="card" href={href({ page: "clip", id: clip.id })} title={clip.title}>
-      <div className="card-media">
-        <Thumb clip={clip} root={root} />
-        <button
-          type="button"
-          className={`card-star${clip.starred ? " on" : ""}`}
-          aria-label={clip.starred ? "Unstar" : "Star"}
-          aria-pressed={clip.starred}
-          title={clip.starred ? "Unstar" : "Star"}
-          onClick={(e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            onStar(clip);
-          }}
-        >
-          <StarIcon on={clip.starred} />
-        </button>
-        {markers.length > 0 && (
-          <div className="card-markers" aria-label={markers.map((m) => `${m.n} ${MARKER_NAMES[m.kind]}`).join(", ")}>
-            {markers.map((m) => (
-              <span key={m.kind} className={`card-mk mk-${m.kind}`}>
-                <MarkerIcon kind={m.kind} size={13} />
-                {m.n > 1 && <b>{m.n}</b>}
-              </span>
-            ))}
-          </div>
-        )}
-        <span className="card-dur" title={trimmed ? "Trimmed" : undefined}>
-          {trimmed && (
-            <svg width="11" height="11" viewBox="0 0 16 16" aria-label="Trimmed" fill="none" stroke="currentColor" strokeWidth="1.5">
-              <circle cx="4" cy="12" r="2.2" />
-              <circle cx="12" cy="12" r="2.2" />
-              <path d="M5.6 10.4 12 2M10.4 10.4 4 2" strokeLinecap="round" />
-            </svg>
-          )}
-          {formatDuration(clip.duration_s)}
-        </span>
-      </div>
-      <div className="card-info">
-        <div className="card-title">{clip.title}</div>
-        <div className="card-meta">
-          <span className="card-game">{clip.game || "Unknown game"}</span>
-          <time dateTime={clip.recorded_at}>{formatTakenAt(clip.recorded_at)}</time>
-        </div>
-      </div>
-    </a>
-  );
-}
 
 function ImportBanner({ onDismiss }: { onDismiss(): void }) {
   const imp = useImport();
@@ -124,13 +72,10 @@ function ImportBanner({ onDismiss }: { onDismiss(): void }) {
 }
 
 export function Library() {
-  const [search, setSearch] = useState(remembered.search);
-  const [query, setQuery] = useState(remembered.search); // debounced
-  const [game, setGame] = useState(remembered.game);
-  const [starredOnly, setStarredOnly] = useState(remembered.starred);
-  const [sort, setSort] = useState<SortOrder>(remembered.sort);
-  const [clips, setClips] = useState<Clip[] | null>(null);
-  const [games, setGames] = useState<string[]>([]);
+  const [search, setSearch] = useState(remembered.filter.search);
+  const [filter, setFilter] = useState<LibraryFilter>(remembered.filter);
+  const [sort, setSort] = useState<LibrarySort>(remembered.sort);
+  const [all, setAll] = useState<Clip[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [showBanner, setShowBanner] = useState(false);
   const imp = useImport();
@@ -141,45 +86,37 @@ export function Library() {
   const [scrollTop, setScrollTop] = useState(0);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const filter: ClipFilter = useMemo(
-    () => ({ game: game || undefined, search: query || undefined, starred: starredOnly || undefined, sort }),
-    [game, query, starredOnly, sort],
-  );
-  const filterRef = useRef(filter);
-  filterRef.current = filter;
-
+  // Debounced search into the filter.
   useEffect(() => {
-    const t = setTimeout(() => setQuery(search.trim()), 200);
+    const t = setTimeout(() => setFilter((f) => (f.search === search.trim() ? f : { ...f, search: search.trim() })), 200);
     return () => clearTimeout(t);
   }, [search]);
 
   useEffect(() => {
-    Object.assign(remembered, { search, game, starred: starredOnly, sort });
-  }, [search, game, starredOnly, sort]);
+    Object.assign(remembered, { filter, sort });
+  }, [filter, sort]);
+
+  const changeFilter = useCallback((f: LibraryFilter) => {
+    setFilter(f);
+    setSearch((s) => (s.trim() === f.search ? s : f.search));
+  }, []);
 
   const toggleStar = useCallback((c: Clip) => {
     const next = !c.starred;
-    const apply = (starred: boolean) =>
-      setClips((list) => {
-        if (!list) return list;
-        // Unstarring under the "Starred" filter drops the card.
-        if (!starred && filterRef.current.starred) return list.filter((x) => x.id !== c.id);
-        return list.map((x) => (x.id === c.id ? { ...x, starred } : x));
-      });
+    const apply = (starred: boolean) => setAll((list) => (list ? list.map((x) => (x.id === c.id ? { ...x, starred } : x)) : list));
     apply(next);
     api.setStarred(c.id, next).catch((e) => {
       reportError("Could not change the star", e);
-      if (filterRef.current.starred && !next) api.listClips(filterRef.current).then(setClips, () => {});
-      else apply(!next);
+      apply(!next);
     });
   }, []);
 
   const load = useCallback(() => {
     let stale = false;
-    api.listClips(filter).then(
+    api.listClips({}).then(
       (v) => {
         if (stale) return;
-        setClips(v);
+        setAll(v);
         setLoadError(null);
       },
       (e) => {
@@ -191,39 +128,29 @@ export function Library() {
     return () => {
       stale = true;
     };
-  }, [filter]);
+  }, []);
 
   useEffect(load, [load, imp.generation]);
-
-  useEffect(() => {
-    api.listGames().then(
-      (g) => setGames(g.map((x) => x.name)),
-      (e) => reportError("Could not load games", e),
-    );
-  }, [imp.generation]);
 
   // Background compression changed a clip's size.
   useEffect(
     () =>
       on("clip-updated", (clip) => {
-        setClips((list) => (list ? list.map((x) => (x.id === clip.id ? { ...x, size: clip.size, compressed: clip.compressed } : x)) : list));
+        setAll((list) =>
+          list
+            ? list.map((x) => (x.id === clip.id ? { ...x, size: clip.size, compressed: clip.compressed, original_size: clip.original_size } : x))
+            : list,
+        );
       }),
     [],
   );
 
-  // Live insert of freshly saved clips.
-  useEffect(
-    () =>
-      on("clip-saved", (clip) => {
-        if (!matchesFilter(clip, filterRef.current)) return;
-        setClips((list) => (list ? insertClip(list, clip, filterRef.current.sort ?? "newest") : list));
-      }),
-    [],
-  );
+  // Live insert of freshly saved clips; the view sorts and filters it in.
+  useEffect(() => on("clip-saved", (clip) => setAll((list) => (list ? insertClip(list, clip, "newest") : list))), []);
 
   // First-run offer: empty library + Moments DB on this PC + not dismissed before.
   useEffect(() => {
-    if (!clips || clips.length > 0 || filter.game || filter.search || filter.starred) return;
+    if (!all || all.length > 0) return;
     let dismissed = false;
     try {
       dismissed = localStorage.getItem(BANNER_KEY) === "1";
@@ -235,7 +162,7 @@ export function Library() {
       (ok) => setShowBanner(ok),
       (e) => reportError("Could not check for a Moments library", e),
     );
-  }, [clips, filter.game, filter.search, filter.starred]);
+  }, [all]);
 
   const dismissBanner = () => {
     try {
@@ -264,20 +191,36 @@ export function Library() {
   // Restore the scroll position once the list is there.
   const restored = useRef(false);
   useLayoutEffect(() => {
-    if (restored.current || !clips || !scrollRef.current) return;
+    if (restored.current || !all || !scrollRef.current) return;
     restored.current = true;
     scrollRef.current.scrollTop = remembered.scrollTop;
     setScrollTop(remembered.scrollTop);
-  }, [clips]);
+  }, [all]);
 
-  const pad = 24;
-  const innerW = Math.max(0, size.w - pad * 2);
+  // A new filter or sort starts at the top (a short result could otherwise sit above the view).
+  const viewKey = useRef({ filter, sort });
+  useLayoutEffect(() => {
+    if (viewKey.current.filter === filter && viewKey.current.sort === sort) return;
+    viewKey.current = { filter, sort };
+    if (scrollRef.current) scrollRef.current.scrollTop = 0;
+    remembered.scrollTop = 0;
+    setScrollTop(0);
+  }, [filter, sort]);
+
+  const list = useMemo(() => (all ? applyView(all, filter, sort) : []), [all, filter, sort]);
+  const facets = useMemo(() => facetCounts(all ?? [], filter), [all, filter]);
+  const dated = sort === "newest" || sort === "oldest";
+
+  const innerW = Math.max(0, size.w - PAD * 2);
   const cols = columnsFor(innerW, MIN_CARD, GAP, MAX_COLS);
   const cardW = cols > 0 ? (innerW - GAP * (cols - 1)) / cols : 0;
-  const rowH = Math.round((cardW * 9) / 16 + INFO_H + GAP);
-  const list = clips ?? [];
-  const rowCount = Math.ceil(list.length / cols);
-  const { first, last } = visibleRows({ scrollTop, viewport: size.h, rowHeight: rowH, rowCount, overscan: 2 });
+  const cardRowH = Math.round((cardW * 9) / 16 + INFO_H + GAP);
+  const layout = useMemo(() => {
+    const groups = dated ? groupByDate(list, (c) => new Date(c.recorded_at), new Date()) : [{ label: "", items: list }];
+    return buildLayout(groups, { cols, cardRowH, headingH: HEADING_H, headings: dated });
+  }, [list, dated, cols, cardRowH]);
+  const { first, last } = visibleRange(layout.rows, scrollTop - PAD, size.h, 2);
+  const sticky = dated && scrollTop > PAD ? headingAt(layout.rows, scrollTop - PAD) : null;
 
   // "/" focuses search, like most tools.
   useEffect(() => {
@@ -291,16 +234,29 @@ export function Library() {
     return () => window.removeEventListener("keydown", k);
   }, []);
 
-  const filtered = Boolean(filter.game || filter.search || filter.starred);
+  const filtered = isFiltered(filter);
   const rows = [];
   for (let r = first; r <= last; r++) {
-    rows.push(
-      <div key={r} className="grid-row" style={{ top: pad + r * rowH, left: pad, right: pad, gridTemplateColumns: `repeat(${cols}, 1fr)` }}>
-        {list.slice(r * cols, r * cols + cols).map((c) => (
-          <ClipCard key={c.id} clip={c} root={scroller} onStar={toggleStar} />
-        ))}
-      </div>,
-    );
+    const row = layout.rows[r];
+    if (row.kind === "heading") {
+      rows.push(
+        <h2 key={`h${r}`} className="group-heading" style={{ top: PAD + row.top, left: PAD, right: PAD, height: row.height }}>
+          {row.label} <span>{row.count}</span>
+        </h2>,
+      );
+    } else {
+      rows.push(
+        <div
+          key={`r${row.firstIndex}`}
+          className="grid-row"
+          style={{ top: PAD + row.top, left: PAD, right: PAD, gridTemplateColumns: `repeat(${cols}, 1fr)` }}
+        >
+          {row.items.map((c) => (
+            <ClipCard key={c.id} clip={c} root={scroller} onStar={toggleStar} />
+          ))}
+        </div>,
+      );
+    }
   }
 
   return (
@@ -328,30 +284,18 @@ export function Library() {
           />
           <kbd className="search-key">/</kbd>
         </div>
-        <select value={game} onChange={(e) => setGame(e.target.value)} aria-label="Filter by game">
-          <option value="">All games</option>
-          {games.map((g) => (
-            <option key={g} value={g}>
-              {g}
+        <select value={sort} onChange={(e) => setSort(e.target.value as LibrarySort)} aria-label="Sort">
+          {SORTS.map(([v, label]) => (
+            <option key={v} value={v}>
+              {label}
             </option>
           ))}
-          {game && !games.includes(game) && <option value={game}>{game}</option>}
         </select>
-        <button
-          type="button"
-          className={`btn btn-toggle${starredOnly ? " on" : ""}`}
-          aria-pressed={starredOnly}
-          onClick={() => setStarredOnly((v) => !v)}
-          title="Show only starred clips"
-        >
-          <StarIcon on={starredOnly} size={14} /> Starred
-        </button>
-        <select value={sort} onChange={(e) => setSort(e.target.value as SortOrder)} aria-label="Sort">
-          <option value="newest">Newest first</option>
-          <option value="oldest">Oldest first</option>
-        </select>
-        <span className="count">{clips ? `${clips.length} ${clips.length === 1 ? "clip" : "clips"}` : ""}</span>
+        <span className="count">
+          {all ? (filtered ? `${list.length} of ${all.length} clips` : `${all.length} ${all.length === 1 ? "clip" : "clips"}`) : ""}
+        </span>
       </div>
+      {all && all.length > 0 && <FilterBar filter={filter} facets={facets} onChange={changeFilter} />}
 
       {showBanner && <ImportBanner onDismiss={dismissBanner} />}
 
@@ -364,29 +308,22 @@ export function Library() {
           setScrollTop(t);
         }}
       >
-        {clips && clips.length > 0 && (
-          <div className="grid-sizer" style={{ height: pad * 2 + rowCount * rowH - GAP }}>
+        {sticky && (
+          <div className="group-sticky" aria-hidden>
+            <div>{sticky}</div>
+          </div>
+        )}
+        {list.length > 0 && (
+          <div className="grid-sizer" style={{ height: PAD * 2 + layout.height - GAP }}>
             {rows}
           </div>
         )}
-        {clips && clips.length === 0 && (
+        {all && list.length === 0 && (
           <div className="empty">
             {filtered ? (
               <>
-                <p>
-                  No {filter.starred ? "starred " : ""}clips match {filter.search ? `“${filter.search}”` : "this filter"}
-                  {filter.game ? ` in ${filter.game}` : ""}.
-                </p>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => {
-                    setSearch("");
-                    setQuery("");
-                    setGame("");
-                    setStarredOnly(false);
-                  }}
-                >
+                <p>No clips match {filter.search ? `“${filter.search}”` : "these filters"}.</p>
+                <button type="button" className="btn" onClick={() => changeFilter(EMPTY_FILTER)}>
                   Clear filters
                 </button>
               </>
@@ -398,7 +335,7 @@ export function Library() {
             )}
           </div>
         )}
-        {!clips && loadError && (
+        {!all && loadError && (
           <div className="empty">
             <p>Could not load the library.</p>
             <p className="muted">{loadError}</p>
