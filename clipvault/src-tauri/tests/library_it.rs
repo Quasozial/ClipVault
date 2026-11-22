@@ -79,6 +79,7 @@ fn setup(ff: &Path) -> (tempfile::TempDir, Mutex<Connection>, PathBuf, Clip) {
         tags: vec!["t".into()],
         starred: false,
         compressed: false,
+        original_size: None,
         markers: vec![
             Marker { t_s: 2.0, kind: MarkerKind::Goal, label: "before".into() },
             Marker { t_s: 7.0, kind: MarkerKind::Goal, label: "inside".into() },

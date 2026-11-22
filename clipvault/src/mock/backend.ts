@@ -107,6 +107,8 @@ function makeClips(n: number): Clip[] {
       markers,
       starred: i % 6 === 2,
       compressed: i % 4 === 1,
+      // Most compressed fixtures were really replaced; every 3rd predates `original_size`.
+      original_size: i % 4 === 1 && i % 3 !== 0 ? Math.round(duration * 5.1 * 1024 * 1024 * 2.6) : null,
     });
   }
   return out;

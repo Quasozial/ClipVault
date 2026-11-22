@@ -277,6 +277,7 @@ impl SaveService {
             tags: Vec::new(),
             starred: false,
             compressed: false,
+            original_size: None,
             markers: markers_for(&linked, &self.bus.between(from, t_press), t_press),
         };
         let db = self.db.clone();

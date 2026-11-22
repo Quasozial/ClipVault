@@ -44,6 +44,8 @@ export interface Clip {
   starred: boolean;
   /** Re-encoded to AV1 by background compression (or tried: it was not smaller). */
   compressed: boolean;
+  /** Size before compression replaced the file; null if it never did (or did before this was recorded). */
+  original_size: number | null;
 }
 
 export interface AudioTrack {

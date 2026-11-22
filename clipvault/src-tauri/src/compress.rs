@@ -382,7 +382,7 @@ pub fn compress_clip(
         Run::Finished { success: false, stderr } => {
             let _ = std::fs::remove_file(&tmp);
             // Mark it anyway: a clip FFmpeg cannot read would fail on every start.
-            clips::set_compressed(&locks::lock(db), id, original)?;
+            clips::set_compressed(&locks::lock(db), id, original, None)?;
             bail!("FFmpeg failed: {}", stderr.lines().last().unwrap_or("").trim());
         }
         Run::Busy => {
@@ -393,7 +393,7 @@ pub fn compress_clip(
         Run::TimedOut => {
             let _ = std::fs::remove_file(&tmp);
             // Marked so a clip that hangs FFmpeg is not retried on every start.
-            clips::set_compressed(&locks::lock(db), id, original)?;
+            clips::set_compressed(&locks::lock(db), id, original, None)?;
             bail!("FFmpeg still running after {} s; stopped", timeout.as_secs());
         }
     }
@@ -440,7 +440,8 @@ pub fn compress_clip(
             }
         }
     };
-    clips::set_compressed(&conn, id, size)?;
+    // Only a replaced file has an original size worth remembering.
+    clips::set_compressed(&conn, id, size, (size != original).then_some(original))?;
     tracing::info!(
         "[compress] {}: {:.1} MB -> {:.1} MB in {:.0} s{}",
         clip.path.display(),

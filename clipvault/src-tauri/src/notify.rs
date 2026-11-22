@@ -261,6 +261,7 @@ mod tests {
             tags: vec![],
             starred: false,
             compressed: false,
+            original_size: None,
             markers: vec![],
         }
     }

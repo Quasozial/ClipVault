@@ -373,6 +373,7 @@ pub fn export_trimmed(
         tags: orig.tags.clone(),
         starred: false,
         compressed: false,
+        original_size: None,
         markers: orig
             .markers
             .iter()
@@ -676,6 +677,7 @@ mod tests {
             tags: tags.iter().map(|t| t.to_string()).collect(),
             starred: false,
             compressed: false,
+            original_size: None,
             markers: vec![Marker { t_s: 7.0, kind: MarkerKind::Goal, label: "G".into() }],
         }
     }

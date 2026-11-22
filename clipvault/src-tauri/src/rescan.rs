@@ -118,6 +118,7 @@ pub fn rescan(db: &Mutex<Connection>, ffmpeg: &Path, dir: &Path, since: Option<S
             markers: Vec::new(),
             starred: false,
             compressed: false,
+            original_size: None,
         };
         let conn = locks::lock(db);
         // A save may have added this file while it was being probed.
@@ -126,7 +127,7 @@ pub fn rescan(db: &Mutex<Connection>, ffmpeg: &Path, dir: &Path, since: Option<S
         }
         clips::insert(&conn, &clip)?;
         if av1 || !may_compress {
-            clips::set_compressed(&conn, &clip.id, clip.size)?;
+            clips::set_compressed(&conn, &clip.id, clip.size, None)?;
         }
         drop(conn);
         tracing::info!("[rescan] re-added {}", path.display());

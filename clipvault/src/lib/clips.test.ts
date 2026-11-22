@@ -23,6 +23,7 @@ const clip = (id: string, recorded_at: string, extra: Partial<Clip> = {}): Clip 
   markers: [],
   starred: false,
   compressed: false,
+  original_size: null,
   ...extra,
 });
 

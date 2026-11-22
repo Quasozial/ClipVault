@@ -18,6 +18,9 @@ CREATE TABLE removed_sources (
     PRIMARY KEY (source, source_id)
 );
 ";
+/// v6: `clips.original_size`: the file size before background compression
+/// replaced the file; NULL when never replaced (or replaced before v6).
+const SCHEMA_V6: &str = "ALTER TABLE clips ADD COLUMN original_size INTEGER;";
 /// v3: `clips.compressed`: the video was re-encoded to AV1 (or tried and
 /// would not get smaller), so background compression skips it.
 const SCHEMA_V3: &str = "ALTER TABLE clips ADD COLUMN compressed INTEGER NOT NULL DEFAULT 0;";
@@ -43,7 +46,7 @@ DELETE FROM clips WHERE rowid IN (
 );
 CREATE UNIQUE INDEX idx_clips_native_path ON clips(path COLLATE NOCASE) WHERE source = 'native';
 ";
-const LATEST_VERSION: i64 = 5;
+const LATEST_VERSION: i64 = 6;
 
 /// How long a statement waits for another connection's write lock (the
 /// Moments import uses its own connection) before failing with SQLITE_BUSY.
@@ -278,6 +281,12 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", 5)?;
         tx.commit()?;
     }
+    if version < 6 {
+        let tx = conn.transaction()?;
+        tx.execute_batch(SCHEMA_V6)?;
+        tx.pragma_update(None, "user_version", 6)?;
+        tx.commit()?;
+    }
     Ok(())
 }
 
@@ -397,6 +406,34 @@ mod tests {
         Connection::open(&path).unwrap().pragma_update(None, "user_version", LATEST_VERSION + 1).unwrap();
         let err = open(&path).unwrap_err().to_string();
         assert!(err.contains("newer than supported"), "{err}");
+    }
+
+    #[test]
+    fn db_migration_v6_adds_empty_original_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.db");
+        {
+            let mut conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            let tx = conn.transaction().unwrap();
+            for s in [SCHEMA_V2, SCHEMA_V3, SCHEMA_V4, SCHEMA_V5] {
+                tx.execute_batch(s).unwrap();
+            }
+            tx.pragma_update(None, "user_version", 5).unwrap();
+            tx.commit().unwrap();
+            conn.execute_batch(
+                r"INSERT INTO games (name) VALUES ('RL');
+                 INSERT INTO clips (id, title, path, game_id, recorded_at, duration, fps, width, height, size,
+                    source, created_at, updated_at, compressed)
+                 VALUES ('old', 't', 'E:\Clips.mp4', 1, '2026-01-01T00:00:00+00:00', 1, 60, 1, 1, 7, 'native', 'x', 'x', 1);",
+            )
+            .unwrap();
+        }
+        let conn = open(&path).unwrap();
+        let v: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert!(v >= 6);
+        let c = crate::db::clips::get(&conn, "old").unwrap().unwrap();
+        assert_eq!((c.size, c.compressed, c.original_size), (7, true, None));
     }
 
     #[test]

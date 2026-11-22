@@ -24,6 +24,7 @@ const clip = (extra: Partial<Clip> = {}): Clip => ({
   markers: [],
   starred: false,
   compressed: false,
+  original_size: null,
   ...extra,
 });
 const mk = (kind: Marker["kind"], label = ""): Marker => ({ t_s: 1, kind, label });

@@ -69,6 +69,10 @@ pub struct Clip {
     /// Re-encoded to AV1 by background compression (or tried; see `compress.rs`).
     #[serde(default)]
     pub compressed: bool,
+    /// Size before compression replaced the file; `None` if it never did (or
+    /// did before schema v6).
+    #[serde(default)]
+    pub original_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -85,7 +89,7 @@ pub struct ClipFilter {
 
 const SELECT: &str = "SELECT c.id, c.title, c.description, c.path, g.name, c.recorded_at, c.duration, c.fps,
     c.width, c.height, c.size, c.trim_in, c.trim_out, c.thumbnail_path, c.source, c.source_id, c.tags_json,
-    c.starred, c.compressed
+    c.starred, c.compressed, c.original_size
     FROM clips c JOIN games g ON g.id = c.game_id";
 
 pub fn insert(conn: &Connection, clip: &Clip) -> Result<()> {
@@ -159,6 +163,7 @@ fn row_to_clip(r: &rusqlite::Row) -> rusqlite::Result<Clip> {
         markers: Vec::new(),
         starred: r.get(17)?,
         compressed: r.get(18)?,
+        original_size: r.get::<_, Option<i64>>(19)?.map(|v| v as u64),
     })
 }
 
@@ -313,10 +318,13 @@ pub fn set_starred(conn: &Connection, id: &str, starred: bool) -> Result<()> {
 }
 
 /// After compression: the file's new size, and the clip is marked done.
-pub fn set_compressed(conn: &Connection, id: &str, size: u64) -> Result<()> {
+/// Marks the clip as done by background compression with its current `size`.
+/// `original_size`: the size before the file was replaced; `None` when it was
+/// not replaced (failed, timed out, not smaller).
+pub fn set_compressed(conn: &Connection, id: &str, size: u64, original_size: Option<u64>) -> Result<()> {
     conn.execute(
-        "UPDATE clips SET compressed = 1, size = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id, size as i64, Utc::now().to_rfc3339()],
+        "UPDATE clips SET compressed = 1, size = ?2, original_size = ?4, updated_at = ?3 WHERE id = ?1",
+        params![id, size as i64, Utc::now().to_rfc3339(), original_size.map(|v| v as i64)],
     )?;
     Ok(())
 }
@@ -403,11 +411,34 @@ mod tests {
             tags: vec!["goal".into(), "fun".into()],
             starred: false,
             compressed: false,
+            original_size: None,
             markers: vec![
                 Marker { t_s: 10.0, kind: MarkerKind::Goal, label: "G".into() },
                 Marker { t_s: 3.0, kind: MarkerKind::Laugh, label: "".into() },
             ],
         }
+    }
+
+    #[test]
+    fn set_compressed_records_original_size_only_when_given() {
+        let conn = open_memory().unwrap();
+        insert(&conn, &sample("a", "native", None)).unwrap();
+        let mut other = sample("b", "native", None);
+        other.path = r"E:\GameClips\other.mp4".into();
+        insert(&conn, &other).unwrap();
+        set_compressed(&conn, "a", 400, Some(1000)).unwrap();
+        set_compressed(&conn, "b", 1000, None).unwrap();
+        let a = get(&conn, "a").unwrap().unwrap();
+        assert_eq!((a.size, a.original_size, a.compressed), (400, Some(1000), true));
+        let b = get(&conn, "b").unwrap().unwrap();
+        assert_eq!((b.size, b.original_size, b.compressed), (1000, None, true));
+    }
+
+    #[test]
+    fn new_clips_have_no_original_size() {
+        let conn = open_memory().unwrap();
+        insert(&conn, &sample("a", "native", None)).unwrap();
+        assert_eq!(get(&conn, "a").unwrap().unwrap().original_size, None);
     }
 
     /// The library list (newest first) is served from an index, not by

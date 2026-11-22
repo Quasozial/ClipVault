@@ -390,6 +390,7 @@ pub fn import_moments(
             tags: parse_tags(&c.tags),
             starred: false,
             compressed: false,
+            original_size: None,
             markers: parse_markers(&c.events, c.full_length, offset, duration_s),
         };
         match clips::insert(conn, &clip) {
