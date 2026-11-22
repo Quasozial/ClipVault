@@ -762,6 +762,120 @@ option {
   opacity: 0;
 }
 
+/* Selection */
+.card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1.5px solid rgba(227, 230, 234, 0.75);
+  border-radius: 6px;
+  background: rgba(12, 14, 17, 0.6);
+  color: var(--accent-ink);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s var(--ease), background-color 0.12s var(--ease);
+}
+.card:hover .card-check,
+.card.selecting .card-check,
+.card-check:focus-visible {
+  opacity: 1;
+}
+.card.selected .card-check {
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.card.selected .card-media {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+.card.focused {
+  outline: 2px solid var(--accent);
+}
+.card.selected .card-media .thumb {
+  opacity: 0.85;
+}
+.bulkbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 8px 24px 4px;
+  padding: 6px 8px 6px 12px;
+  border: 1px solid var(--accent);
+  border-radius: var(--r-m);
+  background: var(--accent-soft);
+}
+.bulk-count {
+  margin-right: 8px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.bulk-count span {
+  color: var(--muted);
+  font-weight: 400;
+}
+.bulk-tag {
+  display: inline-flex;
+  gap: 4px;
+}
+.bulk-tag input {
+  width: 180px;
+}
+.bulk-cancel {
+  margin-left: auto;
+}
+.count-size {
+  cursor: default;
+}
+.rename-input {
+  width: 100%;
+}
+.ctx-menu {
+  position: fixed;
+  z-index: 50;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  background: var(--raise);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+.ctx-title {
+  padding: 6px 10px 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+.ctx-menu button {
+  display: block;
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: var(--r-s);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.ctx-menu button:hover:not(:disabled),
+.ctx-menu button:focus-visible {
+  background: var(--line);
+  outline: none;
+}
+.ctx-menu button.danger {
+  color: var(--rec);
+}
+.ctx-menu button:disabled {
+  color: var(--faint);
+  cursor: default;
+}
+
 /* Filter chips */
 .filterbar {
   display: flex;

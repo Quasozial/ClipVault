@@ -1,13 +1,19 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { api, on, type Clip } from "../api";
+import { BulkBar } from "../components/BulkBar";
 import { ClipCard } from "../components/ClipCard";
+import { ContextMenu, type MenuItem } from "../components/ContextMenu";
 import { FilterBar } from "../components/FilterBar";
+import { ConfirmDialog } from "../components/ui";
 import { insertClip } from "../lib/clips";
 import { groupByDate } from "../lib/dateGroups";
-import { buildLayout, columnsFor, headingAt, visibleRange } from "../lib/grid";
+import { formatBytes } from "../lib/format";
+import { buildLayout, columnsFor, headingAt, moveFocus, visibleRange } from "../lib/grid";
 import { applyView, EMPTY_FILTER, facetCounts, isFiltered, type LibraryFilter, type LibrarySort } from "../lib/libraryView";
-import { startImport, useImport } from "../lib/stores";
-import { reportError } from "../lib/toast";
+import { prune, runBulk, selectRange, toggle } from "../lib/selection";
+import { storageSummary } from "../lib/storage";
+import { navigate, startImport, useImport } from "../lib/stores";
+import { reportError, toast } from "../lib/toast";
 
 /**
  * The library loads the whole clip list in one `list_clips` call and searches,
@@ -222,17 +228,190 @@ export function Library() {
   const { first, last } = visibleRange(layout.rows, scrollTop - PAD, size.h, 2);
   const sticky = dated && scrollTop > PAD ? headingAt(layout.rows, scrollTop - PAD) : null;
 
-  // "/" focuses search, like most tools.
+  // ----- selection, bulk actions, context menu, keyboard -----
+
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const anchor = useRef<string | null>(null);
+  const [focus, setFocus] = useState<number | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; ids: string[]; clip: Clip } | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string[] | null>(null);
+  const [renaming, setRenaming] = useState<{ clip: Clip; title: string } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [exporting, setExporting] = useState<Clip[] | null>(null);
+  const visibleIds = useMemo(() => list.map((c) => c.id), [list]);
+  const byId = useMemo(() => new Map((all ?? []).map((c) => [c.id, c])), [all]);
+  const clipsOf = (ids: string[]) => ids.map((id) => byId.get(id)).filter((c): c is Clip => Boolean(c));
+
+  // Hidden clips drop out of the selection; focus stays in range.
+  useEffect(() => {
+    setSelected((s) => {
+      const p = prune(s, visibleIds);
+      return p.size === s.size ? s : p;
+    });
+    setFocus((f) => (f === null || f < visibleIds.length ? f : visibleIds.length ? visibleIds.length - 1 : null));
+  }, [visibleIds]);
+
+  const onSelect = useCallback(
+    (c: Clip, e: { shift: boolean }) => {
+      // Read the anchor now: the updater runs later, after it moved to `c`.
+      const from = anchor.current;
+      setSelected((s) => (e.shift ? selectRange(s, visibleIds, from, c.id) : toggle(s, c.id)));
+      anchor.current = c.id;
+      setFocus(visibleIds.indexOf(c.id));
+    },
+    [visibleIds],
+  );
+
+  const merge = (changed: Clip[]) => {
+    const m = new Map(changed.map((c) => [c.id, c]));
+    setAll((l) => (l ? l.map((c) => m.get(c.id) ?? c) : l));
+  };
+
+  const starMany = (ids: string[], starred: boolean) =>
+    api.setStarredMany(ids, starred).then(merge, (e) => reportError(starred ? "Could not star the clips" : "Could not unstar the clips", e));
+
+  const tagMany = (ids: string[], tags: string[]) =>
+    api.addTagsMany(ids, tags).then(
+      (changed) => {
+        merge(changed);
+        toast.info(`Tagged ${changed.length} ${changed.length === 1 ? "clip" : "clips"}`);
+      },
+      (e) => reportError("Could not add the tags", e),
+    );
+
+  const compressMany = async (ids: string[]) => {
+    const todo = clipsOf(ids).filter((c) => !c.compressed && c.source === "native");
+    if (todo.length === 0) {
+      toast.info("Nothing to compress: these clips are already compressed or not ClipVault's own files.");
+      return;
+    }
+    const r = await runBulk(
+      todo.map((c) => c.id),
+      (id) => api.compressClip(id),
+    );
+    if (r.failed.length) reportError(`Could not queue ${r.failed.length} of ${todo.length} clips`, r.failed[0].error);
+    if (r.ok.length) toast.info(`Queued ${r.ok.length} ${r.ok.length === 1 ? "clip" : "clips"} for compression`);
+  };
+
+  const deleteMany = async (ids: string[]) => {
+    setBusy(true);
+    const r = await runBulk(ids, (id) => api.deleteClip(id));
+    setBusy(false);
+    setConfirmDelete(null);
+    const gone = new Set(r.ok);
+    setAll((l) => (l ? l.filter((c) => !gone.has(c.id)) : l));
+    setSelected((s) => new Set([...s].filter((id) => !gone.has(id))));
+    if (r.failed.length) reportError(`Could not delete ${r.failed.length} of ${ids.length} clips`, r.failed[0].error);
+  };
+
+  const rename = (c: Clip, title: string) =>
+    api.updateClipMeta(c.id, title, c.description, c.tags).then(
+      (u) => {
+        merge([u]);
+        setRenaming(null);
+      },
+      (e) => reportError("Could not rename the clip", e),
+    );
+
+  const menuItems = (m: { ids: string[]; clip: Clip }): MenuItem[] => {
+    const many = m.ids.length > 1;
+    const anyUnstarred = clipsOf(m.ids).some((c) => !c.starred);
+    return [
+      ...(many
+        ? []
+        : [
+            { label: "Open", onClick: () => navigate({ page: "clip", id: m.clip.id }) },
+            { label: "Reveal in folder", onClick: () => void api.revealInFolder(m.clip.path).catch((e) => reportError("Could not open the folder", e)) },
+          ]),
+      { label: anyUnstarred ? "Star" : "Unstar", onClick: () => void starMany(m.ids, anyUnstarred) },
+      ...(many ? [] : [{ label: "Rename…", onClick: () => setRenaming({ clip: m.clip, title: m.clip.title }) }]),
+      { label: "Compress", onClick: () => void compressMany(m.ids) },
+      { label: many ? `Delete ${m.ids.length} clips…` : "Delete…", danger: true, onClick: () => setConfirmDelete(m.ids) },
+    ];
+  };
+
+  const onContext = useCallback(
+    (c: Clip, x: number, y: number) => {
+      // On a selected card the menu acts on the whole selection.
+      const ids = selected.has(c.id) && selected.size > 1 ? [...selected] : [c.id];
+      setFocus(visibleIds.indexOf(c.id));
+      setMenu({ x, y, ids, clip: c });
+    },
+    [selected, visibleIds],
+  );
+
+  // Keeps the focused card in view and gives it DOM focus.
+  const focusCard = (i: number) => {
+    setFocus(i);
+    const row = layout.rows.find((r) => r.kind === "cards" && i >= r.firstIndex && i < r.firstIndex + r.items.length);
+    const el = scrollRef.current;
+    if (row && el) {
+      const top = PAD + row.top;
+      if (top < el.scrollTop + 40) el.scrollTop = Math.max(0, top - 48);
+      else if (top + row.height > el.scrollTop + el.clientHeight) el.scrollTop = top + row.height - el.clientHeight;
+    }
+    requestAnimationFrame(() => scrollRef.current?.querySelector<HTMLElement>(`[data-id="${CSS.escape(visibleIds[i] ?? "")}"]`)?.focus());
+  };
+
+  // Keys: "/" search, arrows move, Enter open, Space select, S star, Delete, Ctrl+A, Esc.
+  const keyState = useRef({ focus, visibleIds, selected, layout, menu, dialog: false });
+  keyState.current = { focus, visibleIds, selected, layout, menu, dialog: Boolean(confirmDelete || renaming || exporting) };
   useEffect(() => {
     const k = (e: KeyboardEvent) => {
-      if (e.key === "/" && !(e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement)) {
+      const st = keyState.current;
+      const typing = e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement || e.target instanceof HTMLSelectElement;
+      if (typing || st.menu || st.dialog || e.altKey) return;
+      if (e.key === "/") {
         e.preventDefault();
         searchRef.current?.focus();
+        return;
+      }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") {
+        e.preventDefault();
+        setSelected(new Set(st.visibleIds));
+        return;
+      }
+      if (e.key === "Escape" && st.selected.size) {
+        setSelected(new Set());
+        return;
+      }
+      if (e.ctrlKey || e.metaKey || st.visibleIds.length === 0) return;
+      const f = st.focus;
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+        e.preventDefault();
+        actions.current.focusCard(f === null ? 0 : moveFocus(st.layout.rows, f, e.key));
+        return;
+      }
+      if (f === null) return;
+      const id = st.visibleIds[f];
+      const targets = st.selected.size ? [...st.selected] : [id];
+      if (e.key === "Enter") {
+        e.preventDefault();
+        navigate({ page: "clip", id });
+      } else if (e.key === " ") {
+        e.preventDefault();
+        setSelected((s) => toggle(s, id));
+        anchor.current = id;
+      } else if (e.key.toLowerCase() === "s") {
+        const anyUnstarred = targets.some((t) => !byIdRef.current.get(t)?.starred);
+        void actions.current.starMany(targets, anyUnstarred);
+      } else if (e.key === "Delete") {
+        setConfirmDelete(targets);
       }
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
+    // Handlers read live state through keyState/byIdRef/actions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+  const byIdRef = useRef(byId);
+  byIdRef.current = byId;
+  const actions = useRef({ focusCard, starMany });
+  actions.current = { focusCard, starMany };
+
+  const storage = useMemo(() => storageSummary(all ?? []), [all]);
+  const selectedSize = useMemo(() => clipsOf([...selected]).reduce((n, c) => n + c.size, 0), [selected, byId]);
+  const deleteSize = confirmDelete ? clipsOf(confirmDelete).reduce((n, c) => n + c.size, 0) : 0;
 
   const filtered = isFiltered(filter);
   const rows = [];
@@ -252,7 +431,17 @@ export function Library() {
           style={{ top: PAD + row.top, left: PAD, right: PAD, gridTemplateColumns: `repeat(${cols}, 1fr)` }}
         >
           {row.items.map((c) => (
-            <ClipCard key={c.id} clip={c} root={scroller} onStar={toggleStar} />
+            <ClipCard
+              key={c.id}
+              clip={c}
+              root={scroller}
+              onStar={toggleStar}
+              selected={selected.has(c.id)}
+              selecting={selected.size > 0}
+              focused={focus !== null && visibleIds[focus] === c.id}
+              onSelect={onSelect}
+              onContext={onContext}
+            />
           ))}
         </div>,
       );
@@ -293,9 +482,32 @@ export function Library() {
         </select>
         <span className="count">
           {all ? (filtered ? `${list.length} of ${all.length} clips` : `${all.length} ${all.length === 1 ? "clip" : "clips"}`) : ""}
+          {all && all.length > 0 && (
+            <span
+              className="count-size"
+              title={storage.saved > 0 ? `${storage.lowerBound ? "At least " : ""}${formatBytes(storage.saved)} saved by compression` : "Total size of the library"}
+            >
+              {" · "}
+              {formatBytes(storage.total)}
+            </span>
+          )}
         </span>
       </div>
-      {all && all.length > 0 && <FilterBar filter={filter} facets={facets} onChange={changeFilter} />}
+      {selected.size > 0 ? (
+        <BulkBar
+          count={selected.size}
+          sizeText={formatBytes(selectedSize)}
+          busy={busy}
+          onStar={(s) => void starMany([...selected], s)}
+          onAddTags={(t) => void tagMany([...selected], t)}
+          onCompress={() => void compressMany([...selected])}
+          onExport={() => setExporting(clipsOf([...selected]))}
+          onDelete={() => setConfirmDelete([...selected])}
+          onCancel={() => setSelected(new Set())}
+        />
+      ) : (
+        all && all.length > 0 && <FilterBar filter={filter} facets={facets} onChange={changeFilter} />
+      )}
 
       {showBanner && <ImportBanner onDismiss={dismissBanner} />}
 
@@ -345,6 +557,47 @@ export function Library() {
           </div>
         )}
       </div>
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          title={menu.ids.length > 1 ? `${menu.ids.length} clips` : undefined}
+          items={menuItems(menu)}
+          onClose={() => setMenu(null)}
+        />
+      )}
+      <ConfirmDialog
+        open={confirmDelete !== null}
+        title={confirmDelete && confirmDelete.length > 1 ? `Delete ${confirmDelete.length} clips?` : "Delete this clip?"}
+        confirmLabel={busy ? "Deleting…" : "Move to Recycle Bin"}
+        danger
+        busy={busy}
+        onConfirm={() => confirmDelete && void deleteMany(confirmDelete)}
+        onCancel={() => setConfirmDelete(null)}
+      >
+        <p>
+          {confirmDelete && confirmDelete.length > 1 ? `${confirmDelete.length} clips` : "The clip"} ({formatBytes(deleteSize)}) will be moved to the Recycle
+          Bin. You can restore {confirmDelete && confirmDelete.length > 1 ? "them" : "it"} from there.
+        </p>
+      </ConfirmDialog>
+      <ConfirmDialog
+        open={renaming !== null}
+        title="Rename clip"
+        confirmLabel="Rename"
+        onConfirm={() => renaming && renaming.title.trim() && void rename(renaming.clip, renaming.title)}
+        onCancel={() => setRenaming(null)}
+      >
+        <input
+          className="rename-input"
+          aria-label="Title"
+          value={renaming?.title ?? ""}
+          onChange={(e) => setRenaming((r) => (r ? { ...r, title: e.target.value } : r))}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && renaming?.title.trim()) void rename(renaming.clip, renaming.title);
+          }}
+        />
+      </ConfirmDialog>
     </div>
   );
 }

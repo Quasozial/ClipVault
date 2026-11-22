@@ -20,7 +20,19 @@ export function wasShrunk(c: Clip): boolean {
   return c.original_size !== null && c.original_size > c.size;
 }
 
-export function ClipCard({ clip, root, onStar }: { clip: Clip; root: Element | null; onStar(c: Clip): void }) {
+export interface ClipCardProps {
+  clip: Clip;
+  root: Element | null;
+  onStar(c: Clip): void;
+  selected: boolean;
+  /** Something is selected: every card shows its checkbox. */
+  selecting: boolean;
+  focused: boolean;
+  onSelect(c: Clip, e: { shift: boolean }): void;
+  onContext(c: Clip, x: number, y: number): void;
+}
+
+export function ClipCard({ clip, root, onStar, selected, selecting, focused, onSelect, onContext }: ClipCardProps) {
   const trimmed = clip.trim_in !== null || clip.trim_out !== null;
   const markers = markerSummary(clip);
   const [hover, setHover] = useState(false);
@@ -29,7 +41,23 @@ export function ClipCard({ clip, root, onStar }: { clip: Clip; root: Element | n
   const scrubbing = strip !== null && frame !== null;
 
   return (
-    <a className="card" href={href({ page: "clip", id: clip.id })} title={clip.title}>
+    <a
+      className={`card${selected ? " selected" : ""}${selecting ? " selecting" : ""}${focused ? " focused" : ""}`}
+      href={href({ page: "clip", id: clip.id })}
+      title={clip.title}
+      data-id={clip.id}
+      onClick={(e) => {
+        // While selecting, a click (or Ctrl/Shift-click) selects instead of opening.
+        if (selecting || e.ctrlKey || e.shiftKey) {
+          e.preventDefault();
+          onSelect(clip, { shift: e.shiftKey });
+        }
+      }}
+      onContextMenu={(e) => {
+        e.preventDefault();
+        onContext(clip, e.clientX, e.clientY);
+      }}
+    >
       <div
         className="card-media"
         onPointerEnter={() => setHover(true)}
@@ -58,6 +86,23 @@ export function ClipCard({ clip, root, onStar }: { clip: Clip; root: Element | n
             </div>
           </>
         )}
+        <button
+          type="button"
+          role="checkbox"
+          className="card-check"
+          aria-checked={selected}
+          aria-label={selected ? "Deselect" : "Select"}
+          title={selected ? "Deselect" : "Select (Shift: range)"}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            onSelect(clip, { shift: e.shiftKey });
+          }}
+        >
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden>
+            {selected && <path d="M3.5 8.2 6.6 11.2 12.5 4.8" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />}
+          </svg>
+        </button>
         <button
           type="button"
           className={`card-star${clip.starred ? " on" : ""}`}
