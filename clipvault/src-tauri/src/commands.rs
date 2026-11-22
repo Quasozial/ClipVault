@@ -283,7 +283,13 @@ pub fn list_encoders(core: Core<'_>) -> EncoderList {
 /// Queues the clip for background AV1 compression; `clip-updated` follows.
 #[tauri::command]
 pub fn compress_clip(core: Core<'_>, id: String) {
-    core.compressor().enqueue(&id);
+    core.compressor().enqueue_next(&id);
+}
+
+/// Whether the clip is waiting for or in background compression, and where.
+#[tauri::command]
+pub fn compress_status(core: Core<'_>, id: String) -> Option<crate::compress::Stage> {
+    core.compressor().stage(&id)
 }
 
 #[tauri::command]

@@ -131,6 +131,7 @@ ${field ? `<path d="M0 120 L320 104 L320 180 L0 180Z" fill="hsl(${110 + r() * 30
 export function createMockBackend(): Backend {
   const empty = new URLSearchParams(window.location.search).get("mock") === "empty";
   let clips = empty ? [] : makeClips(40);
+  const compressing = new Map<string, "queued" | "encoding" | "swapping">();
   let nextClip = 100;
   let games: Game[] = [
     { id: 1, name: "Rocket League", exe_names: ["RocketLeague.exe"], path: "C:\\Program Files\\Epic Games\\rocketleague\\Binaries\\Win64\\RocketLeague.exe", enabled: true },
@@ -377,15 +378,30 @@ export function createMockBackend(): Backend {
       auto: { id: "Av1Nvenc", label: "NVIDIA AV1", hardware: true },
     }),
     compress_clip: ({ id }) => {
+      if (compressing.has(id)) return null;
+      compressing.set(id, "queued");
+      emit("compress-status", { id, stage: "queued" });
       setTimeout(() => {
+        compressing.set(id, "encoding");
+        emit("compress-status", { id, stage: "encoding" });
+      }, 500);
+      setTimeout(() => {
+        compressing.set(id, "swapping");
+        emit("compress-status", { id, stage: "swapping" });
+      }, 2500);
+      setTimeout(() => {
+        compressing.delete(id);
         const c = clips.find((x) => x.id === id);
-        if (!c) return;
-        c.size = Math.round(c.size / 3);
-        c.compressed = true;
-        emit("clip-updated", c);
-      }, 1500);
+        if (c) {
+          c.size = Math.round(c.size / 3);
+          c.compressed = true;
+          emit("clip-updated", c);
+        }
+        emit("compress-status", { id, stage: null });
+      }, 4000);
       return null;
     },
+    compress_status: ({ id }) => compressing.get(id) ?? null,
     list_displays: (): DisplayInfo[] => [
       { id: "\\\\.\\DISPLAY1", output_idx: 0, width: 2560, height: 1440, refresh_hz: 165, primary: true, hdr: true },
       { id: "\\\\.\\DISPLAY2", output_idx: 1, width: 1920, height: 1080, refresh_hz: 60, primary: false, hdr: false },

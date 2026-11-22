@@ -20,8 +20,18 @@ pub enum Sound {
     Mark,
 }
 
+/// Look of the on-screen banner (`overlay`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BannerKind {
+    Saved,
+    Error,
+}
+
 pub trait Ui: Send + Sync {
     fn toast(&self, title: &str, body: &str);
+    /// On-screen banner over the game ("Clip saved"); a no-op outside the app.
+    fn banner(&self, _kind: BannerKind, _title: &str, _detail: &str) {}
     fn play(&self, sound: Sound);
     /// Health of the capture pipeline plus the current target label
     /// (`Rocket League`, `Desktop`, or `None` when idle).
@@ -38,6 +48,18 @@ pub trait Ui: Send + Sync {
 
 pub const APP_TITLE: &str = "ClipVault";
 
+/// Banner detail line: "58 s · Rocket League" + " · started late" / " · contains gap".
+pub fn saved_detail(clip: &Clip, gap: bool, short: bool) -> String {
+    let mut t = format!("{} s · {}", clip.duration_s.round() as u64, clip.game);
+    if short {
+        t.push_str(" · started late");
+    }
+    if gap {
+        t.push_str(" · contains gap");
+    }
+    t
+}
+
 /// "Clip saved (58 s, Rocket League)" + " – started late" / " – contains gap".
 pub fn saved_text(clip: &Clip, gap: bool, short: bool) -> String {
     let mut t = format!("Clip saved ({} s, {})", clip.duration_s.round() as u64, clip.game);
@@ -52,17 +74,20 @@ pub fn saved_text(clip: &Clip, gap: bool, short: bool) -> String {
 
 pub fn saved(ui: &dyn Ui, clip: &Clip, gap: bool, short: bool) {
     ui.toast(APP_TITLE, &saved_text(clip, gap, short));
+    ui.banner(BannerKind::Saved, "Clip saved", &saved_detail(clip, gap, short));
     ui.play(Sound::Saved);
     ui.clip_saved(clip);
 }
 
 pub fn error(ui: &dyn Ui, reason: &str) {
     ui.toast(APP_TITLE, &format!("Clip NOT saved: {reason}"));
+    ui.banner(BannerKind::Error, "Clip NOT saved", reason);
     ui.play(Sound::Error);
 }
 
 pub fn not_recording(ui: &dyn Ui) {
     ui.toast(APP_TITLE, "Not recording – nothing to save");
+    ui.banner(BannerKind::Error, "Not recording", "Nothing to save");
     ui.play(Sound::Error);
 }
 
@@ -250,6 +275,8 @@ mod tests {
             saved_text(&clip(12.6, "Desktop"), true, true),
             "Clip saved (13 s, Desktop) – started late – contains gap"
         );
+        assert_eq!(saved_detail(&c, false, false), "58 s · Rocket League");
+        assert_eq!(saved_detail(&clip(12.6, "Desktop"), true, true), "13 s · Desktop · started late · contains gap");
     }
 
     #[test]

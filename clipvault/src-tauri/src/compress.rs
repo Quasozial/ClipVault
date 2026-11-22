@@ -17,17 +17,17 @@ use crate::locks;
 use crate::settings::Encoder;
 use anyhow::{bail, Result};
 use rusqlite::Connection;
-use std::collections::HashSet;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 /// The result must be at most this share of the original, or it is discarded.
 const KEEP_RATIO: f64 = 0.9;
 /// Replacing a clip that is open in the player fails; retried for ~10 min.
-const RENAME_ATTEMPTS: u32 = 30;
-const RENAME_RETRY: Duration = Duration::from_secs(20);
+const RENAME_ATTEMPTS: u32 = 300;
+const RENAME_RETRY: Duration = Duration::from_secs(2);
 /// How often a waiting job checks whether the game has ended.
 const BUSY_POLL: Duration = Duration::from_secs(15);
 /// Encode timeout: this much, plus `TIMEOUT_PER_CLIP_S` seconds per clip second.
@@ -39,13 +39,54 @@ pub type OnUpdate = Arc<dyn Fn(&Clip) + Send + Sync>;
 /// True while compression should wait (a game is being recorded).
 pub type IsBusy = Arc<dyn Fn() -> bool + Send + Sync>;
 
+/// Called when a clip's compression stage changed (`None`: no longer in the queue).
+pub type OnStage = Arc<dyn Fn(&str, Option<Stage>) + Send + Sync>;
+
+/// Where a clip is in the compression queue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Stage {
+    /// Waiting for its turn (or for a game to end).
+    Queued,
+    Encoding,
+    /// Encoded; waiting for the player to release the file so it can be replaced.
+    Swapping,
+}
+
+#[derive(Default)]
+struct Queue {
+    order: VecDeque<String>,
+    /// Every id waiting or running, so a clip is never queued twice.
+    stage: HashMap<String, Stage>,
+}
+
+struct Shared {
+    queue: Mutex<Queue>,
+    wake: Condvar,
+    on_stage: Mutex<Option<OnStage>>,
+}
+
+impl Shared {
+    /// Sets (or with `None` clears) a clip's stage and tells the UI.
+    fn set_stage(&self, id: &str, stage: Option<Stage>) {
+        {
+            let mut q = locks::lock(&self.queue);
+            match stage {
+                Some(s) => q.stage.insert(id.to_string(), s),
+                None => q.stage.remove(id),
+            };
+        }
+        if let Some(f) = locks::lock(&self.on_stage).clone() {
+            f(id, stage);
+        }
+    }
+}
+
 pub struct Compressor {
     ffmpeg: Option<PathBuf>,
     db: Arc<Mutex<Connection>>,
-    tx: mpsc::Sender<String>,
-    rx: Mutex<Option<mpsc::Receiver<String>>>,
-    /// Ids waiting or running, so a clip is never queued twice.
-    queued: Arc<Mutex<HashSet<String>>>,
+    shared: Arc<Shared>,
+    started: AtomicBool,
     on_update: Arc<Mutex<Option<OnUpdate>>>,
 }
 
@@ -85,25 +126,61 @@ pub fn worth_keeping(original: u64, compressed: u64) -> bool {
 
 impl Compressor {
     pub fn new(ffmpeg: Option<PathBuf>, db: Arc<Mutex<Connection>>) -> Arc<Compressor> {
-        let (tx, rx) = mpsc::channel();
         Arc::new(Compressor {
             ffmpeg,
             db,
-            tx,
-            rx: Mutex::new(Some(rx)),
-            queued: Arc::new(Mutex::new(HashSet::new())),
+            shared: Arc::new(Shared { queue: Mutex::new(Queue::default()), wake: Condvar::new(), on_stage: Mutex::new(None) }),
+            started: AtomicBool::new(false),
             on_update: Arc::new(Mutex::new(None)),
         })
+    }
+
+    pub fn set_on_stage(&self, f: OnStage) {
+        *locks::lock(&self.shared.on_stage) = Some(f);
+    }
+
+    /// The clip's stage, `None` when it is neither waiting nor running.
+    pub fn stage(&self, id: &str) -> Option<Stage> {
+        locks::lock(&self.shared.queue).stage.get(id).copied()
     }
 
     pub fn set_on_update(&self, f: OnUpdate) {
         *locks::lock(&self.on_update) = Some(f);
     }
 
-    /// Queues one clip (no-op if already queued). Runs once [`Compressor::start`] was called.
+    /// Queues one clip at the end (no-op if already queued). Runs once [`Compressor::start`] was called.
     pub fn enqueue(&self, id: &str) {
-        if locks::lock(&self.queued).insert(id.to_string()) {
-            let _ = self.tx.send(id.to_string());
+        self.push(id, false);
+    }
+
+    /// Queues one clip as the next one: the user asked for it. A clip already
+    /// waiting moves to the front; one already running is left alone.
+    pub fn enqueue_next(&self, id: &str) {
+        self.push(id, true);
+    }
+
+    fn push(&self, id: &str, front: bool) {
+        {
+            let mut q = locks::lock(&self.shared.queue);
+            match q.stage.get(id) {
+                Some(Stage::Queued) if front => {
+                    q.order.retain(|x| x != id);
+                    q.order.push_front(id.to_string());
+                    return;
+                }
+                Some(_) => return,
+                None => {}
+            }
+            q.stage.insert(id.to_string(), Stage::Queued);
+            if front {
+                q.order.push_front(id.to_string());
+            } else {
+                q.order.push_back(id.to_string());
+            }
+        }
+        self.shared.wake.notify_one();
+        if let Some(f) = locks::lock(&self.shared.on_stage).clone() {
+            f(id, Some(Stage::Queued));
         }
     }
 
@@ -126,37 +203,55 @@ impl Compressor {
     /// Starts the worker thread (once). `available`: recording encoders this PC
     /// can run (picks the AV1 encoder); `busy`: wait while it returns true.
     pub fn start(&self, available: Vec<Encoder>, busy: IsBusy) {
-        let Some(rx) = locks::lock(&self.rx).take() else { return };
         let Some(ffmpeg) = self.ffmpeg.clone() else { return };
+        if self.started.swap(true, Ordering::SeqCst) {
+            return;
+        }
         let encoder = compress_encoder(&available);
-        let (db, queued, on_update) = (self.db.clone(), self.queued.clone(), self.on_update.clone());
+        let (db, shared, on_update) = (self.db.clone(), self.shared.clone(), self.on_update.clone());
         tracing::info!("[compress] worker ready, encoder {encoder}");
         let spawned = std::thread::Builder::new().name("compress".into()).spawn(move || {
-            for id in rx {
+            loop {
+                let id = {
+                    let mut q = locks::lock(&shared.queue);
+                    loop {
+                        if let Some(id) = q.order.pop_front() {
+                            break id;
+                        }
+                        q = shared.wake.wait(q).unwrap_or_else(|e| e.into_inner());
+                    }
+                };
                 // Panics stay inside this job: the worker and the queue live on.
                 let result = loop {
                     while busy() {
                         std::thread::sleep(BUSY_POLL);
                     }
+                    shared.set_stage(&id, Some(Stage::Encoding));
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        compress_clip(&ffmpeg, &db, &id, encoder, &*busy)
+                        compress_clip(&ffmpeg, &db, &id, encoder, &*busy, &|s| shared.set_stage(&id, Some(s)))
                     }));
                     match run {
-                        Ok(Ok(Outcome::Interrupted)) => continue,
+                        Ok(Ok(Outcome::Interrupted)) => {
+                            shared.set_stage(&id, Some(Stage::Queued));
+                            continue;
+                        }
                         Ok(r) => break r,
                         Err(_) => break Err(anyhow::anyhow!("internal error (panic) while compressing")),
                     }
                 };
-                match result {
-                    Ok(Outcome::Done(Some(clip))) => {
-                        if let Some(f) = locks::lock(&on_update).clone() {
-                            f(&clip);
-                        }
+                // A failed job may have marked the clip too: the UI gets its row either way.
+                let clip = match result {
+                    Ok(Outcome::Done(clip)) => clip,
+                    Ok(Outcome::Interrupted) => None,
+                    Err(e) => {
+                        tracing::error!("[compress] clip {id}: {e:#}");
+                        clips::get(&locks::lock(&db), &id).ok().flatten()
                     }
-                    Ok(_) => {}
-                    Err(e) => tracing::error!("[compress] clip {id}: {e:#}"),
+                };
+                if let (Some(clip), Some(f)) = (clip, locks::lock(&on_update).clone()) {
+                    f(&clip);
                 }
-                locks::lock(&queued).remove(&id);
+                shared.set_stage(&id, None);
             }
         });
         if let Err(e) = spawned {
@@ -265,7 +360,15 @@ pub fn same_media(original: Option<MediaInfo>, compressed: Option<MediaInfo>) ->
 }
 
 /// Compresses one clip. `Ok(None)`: nothing to do (gone, foreign, done).
-pub fn compress_clip(ffmpeg: &Path, db: &Mutex<Connection>, id: &str, encoder: &str, busy: &dyn Fn() -> bool) -> Result<Outcome> {
+/// `on_stage` is told when the encode is done and the file swap waits for the player.
+pub fn compress_clip(
+    ffmpeg: &Path,
+    db: &Mutex<Connection>,
+    id: &str,
+    encoder: &str,
+    busy: &dyn Fn() -> bool,
+    on_stage: &dyn Fn(Stage),
+) -> Result<Outcome> {
     let Some(clip) = clips::get(&locks::lock(db), id)? else { return Ok(Outcome::Done(None)) };
     if clip.compressed || clip.source != "native" || !clip.path.is_file() {
         return Ok(Outcome::Done(None));
@@ -325,6 +428,9 @@ pub fn compress_clip(ffmpeg: &Path, db: &Mutex<Connection>, id: &str, encoder: &
             // Typically the clip is open in the player: wait for it to close.
             Err(_) if attempt < RENAME_ATTEMPTS => {
                 drop(conn);
+                if attempt == 0 {
+                    on_stage(Stage::Swapping);
+                }
                 attempt += 1;
                 std::thread::sleep(RENAME_RETRY);
             }
@@ -481,9 +587,35 @@ At least one output file must be specified
     }
 
     #[test]
+    fn a_clip_is_queued_once_and_a_request_jumps_the_queue() {
+        let c = Compressor::new(None, Arc::new(Mutex::new(crate::db::open_memory().unwrap())));
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let s = seen.clone();
+        c.set_on_stage(Arc::new(move |id, stage| s.lock().unwrap().push((id.to_string(), stage))));
+        assert_eq!(c.stage("a"), None);
+        c.enqueue("a");
+        c.enqueue("b");
+        c.enqueue("a");
+        c.enqueue_next("c");
+        c.enqueue_next("b");
+        c.enqueue_next("b");
+        assert_eq!(c.shared.queue.lock().unwrap().order, ["b", "c", "a"]);
+        assert_eq!(c.stage("b"), Some(Stage::Queued));
+        let q = Some(Stage::Queued);
+        assert_eq!(*seen.lock().unwrap(), [("a".to_string(), q), ("b".to_string(), q), ("c".to_string(), q)]);
+        // A running clip is not queued again.
+        c.shared.queue.lock().unwrap().order.clear();
+        c.shared.set_stage("a", Some(Stage::Encoding));
+        c.enqueue_next("a");
+        assert!(c.shared.queue.lock().unwrap().order.is_empty());
+        c.shared.set_stage("a", None);
+        assert_eq!(c.stage("a"), None);
+    }
+
+    #[test]
     fn skips_missing_foreign_and_done_clips() {
         let db = Mutex::new(crate::db::open_memory().unwrap());
-        let r = compress_clip(Path::new("ffmpeg.exe"), &db, "nope", "libsvtav1", &|| false).unwrap();
+        let r = compress_clip(Path::new("ffmpeg.exe"), &db, "nope", "libsvtav1", &|| false, &|_| {}).unwrap();
         assert!(matches!(r, Outcome::Done(None)));
     }
 }

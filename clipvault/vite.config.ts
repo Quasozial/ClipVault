@@ -7,6 +7,12 @@ const host = process.env.TAURI_DEV_HOST;
 // https://vite.dev/config/
 export default defineConfig(() => ({
   plugins: [react()],
+  // Second page: the on-screen "Clip saved" banner window (src-tauri/src/overlay.rs).
+  build: {
+    rollupOptions: {
+      input: { main: "index.html", overlay: "overlay.html" },
+    },
+  },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
   //

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, fileSrc, on, type AudioTrack, type Clip } from "../api";
+import { api, fileSrc, on, type AudioTrack, type Clip, type CompressStage } from "../api";
 import { StarIcon } from "../components/StarIcon";
 import { forgetThumb } from "../components/Thumb";
 import { Timeline, type TimelineTrack } from "../components/Timeline";
@@ -166,14 +166,51 @@ export function ClipView({ id }: { id: string }) {
   }, [id]);
 
   // Background compression finished: new size, and the Compress button goes.
-  const [compressQueued, setCompressQueued] = useState(false);
+  // The stage lives in the backend, so it is still known when the clip is
+  // opened again; `asked` covers the moment until the backend answers.
+  const [compressStage, setCompressStage] = useState<CompressStage | "asked" | null>(null);
+  // The compressed file cannot replace one the player holds open: at
+  // `swapping` the video lets go of it, and once the stage ends a fresh
+  // element (new `videoVersion`) loads the file again where it was.
+  const [videoVersion, setVideoVersion] = useState(0);
+  const resume = useRef<{ t: number; play: boolean } | null>(null);
   useEffect(() => {
-    setCompressQueued(false);
-    return on("clip-updated", (c) => {
+    let live = true;
+    let heard = false;
+    let released = false;
+    setCompressStage(null);
+    setVideoVersion(0);
+    resume.current = null;
+    const offClip = on("clip-updated", (c) => {
       if (c.id !== id) return;
       setClip((old) => (old ? { ...old, size: c.size, compressed: c.compressed } : c));
-      setCompressQueued(false);
     });
+    const offStage = on("compress-status", (s) => {
+      if (s.id !== id) return;
+      heard = true;
+      setCompressStage(s.stage);
+      const v = videoRef.current;
+      if (s.stage === "swapping" && !released && v) {
+        released = true;
+        resume.current = { t: v.currentTime, play: !v.paused };
+        v.pause();
+        v.removeAttribute("src");
+        v.load();
+      } else if (s.stage === null && released) {
+        released = false;
+        setVideoVersion((n) => n + 1);
+      }
+    });
+    api.compressStatus(id).then(
+      // An event that arrived meanwhile is newer than this answer.
+      (stage) => live && !heard && setCompressStage(stage),
+      () => {},
+    );
+    return () => {
+      live = false;
+      offClip();
+      offStage();
+    };
   }, [id]);
 
   useEffect(() => {
@@ -563,16 +600,22 @@ export function ClipView({ id }: { id: string }) {
 
         <div className="player" ref={playerRef} onClick={togglePlay} onDoubleClick={toggleFullscreen}>
           <video
+            key={videoVersion}
             ref={videoRef}
-            src={fileSrc(clip.path)}
+            // The version only makes the URL new, so the swapped file is not served from cache.
+            src={fileSrc(clip.path) + (videoVersion ? `?v=${videoVersion}` : "")}
             preload="auto"
             muted={separateAudio}
             onLoadedMetadata={(e) => {
               const v = e.currentTarget;
               if (Number.isFinite(v.duration)) setMediaDuration(v.duration);
-              if (clip.trim_in) v.currentTime = clip.trim_in;
+              const back = resume.current;
+              resume.current = null;
+              if (back) v.currentTime = back.t;
+              else if (clip.trim_in) v.currentTime = clip.trim_in;
               v.playbackRate = rate;
               setCurrent(v.currentTime);
+              if (back?.play) v.play().catch(() => {});
             }}
             onPlay={() => {
               setPlaying(true);
@@ -605,6 +648,11 @@ export function ClipView({ id }: { id: string }) {
               onError={() => setAudioFailed(true)}
             />
           ))}
+          {compressStage === "swapping" && !videoError && (
+            <div className="player-error">
+              <p>Switching to the compressed file…</p>
+            </div>
+          )}
           {videoError && (
             <div className="player-error">
               <p>This video file could not be played.</p>
@@ -817,20 +865,26 @@ export function ClipView({ id }: { id: string }) {
             <button
               type="button"
               className="btn btn-wide"
-              disabled={compressQueued}
+              disabled={compressStage !== null}
               title="Re-encodes the video to AV1 in the background; audio stays as it is"
               onClick={() => {
-                setCompressQueued(true);
+                setCompressStage("asked");
                 api.compressClip(clip.id).then(
-                  () => toast.info("Compressing in the background. The file is swapped once you leave this clip."),
+                  () => toast.info("Compressing in the background. The player reloads briefly when it is done."),
                   (e) => {
-                    setCompressQueued(false);
+                    setCompressStage((s) => (s === "asked" ? null : s));
                     reportError("Could not start compression", e);
                   },
                 );
               }}
             >
-              {compressQueued ? "Compressing…" : "Compress to save space"}
+              {compressStage === null
+                ? "Compress to save space"
+                : compressStage === "swapping"
+                  ? "Switching file…"
+                  : compressStage === "encoding"
+                    ? "Compressing…"
+                    : "Waiting to compress…"}
             </button>
           </div>
         )}

@@ -3,7 +3,7 @@
 use super::health::tray_state;
 use crate::capture::supervisor::Health;
 use crate::db::clips::Clip;
-use crate::notify::{play_sound, Sound, Ui};
+use crate::notify::{play_sound, BannerKind, Sound, Ui};
 use crate::tray;
 use serde::Serialize;
 use tauri::{AppHandle, Emitter};
@@ -52,6 +52,10 @@ impl Ui for TauriUi {
         if let Err(e) = self.app.notification().builder().title(title).body(body).show() {
             tracing::warn!("toast failed ({e}): {body}");
         }
+    }
+
+    fn banner(&self, kind: BannerKind, title: &str, detail: &str) {
+        crate::overlay::show(&self.app, kind, title, detail);
     }
 
     fn play(&self, sound: Sound) {

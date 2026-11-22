@@ -209,11 +209,16 @@ export interface ImportProgress {
   total: number;
 }
 
+/** Where a clip is in background compression. */
+export type CompressStage = "queued" | "encoding" | "swapping";
+
 export interface EventMap {
   "health-changed": Health;
   "clip-saved": Clip;
   /** A clip changed in the background (compression finished). */
   "clip-updated": Clip;
+  /** A clip's compression stage changed (`null`: finished or given up). */
+  "compress-status": { id: string; stage: CompressStage | null };
   "mic-level": { dbfs: number };
   "import-progress": ImportProgress;
   /** Main window hidden to the tray (close button) or shown again from the tray. */
@@ -299,6 +304,8 @@ export const api = {
   audioTracks: (id: string) => call<AudioTrack[]>("audio_tracks", { id }),
   /** Queues background AV1 compression; `clip-updated` follows when done. */
   compressClip: (id: string) => call<null>("compress_clip", { id }),
+  /** `null`: the clip is not waiting for or in compression. */
+  compressStatus: (id: string) => call<CompressStage | null>("compress_status", { id }),
 
   // games
   listGames: () => call<Game[]>("list_games"),

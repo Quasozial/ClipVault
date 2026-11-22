@@ -14,6 +14,7 @@ pub mod library;
 pub mod locks;
 pub mod logging;
 pub mod notify;
+pub mod overlay;
 pub mod rescan;
 pub mod rl_stats;
 pub mod save;
@@ -259,6 +260,10 @@ pub fn run() {
                 core.compressor().set_on_update(Arc::new(move |clip| {
                     let _ = h.emit("clip-updated", clip);
                 }));
+                let h = handle.clone();
+                core.compressor().set_on_stage(Arc::new(move |id, stage| {
+                    let _ = h.emit("compress-status", serde_json::json!({ "id": id, "stage": stage }));
+                }));
             }
             commands::refresh_asset_scope(&handle, &core);
             tray::build(&handle, core.clone())?;
@@ -278,6 +283,9 @@ pub fn run() {
         .on_window_event(|window, event| {
             // Tray app: closing the window hides it; Quit is in the tray menu.
             if let WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() != "main" {
+                    return;
+                }
                 api.prevent_close();
                 let _ = window.hide();
                 // A hidden page cannot tell (WebView2 stays "visible"): stop the
@@ -314,6 +322,7 @@ pub fn run() {
             commands::list_displays,
             commands::list_encoders,
             commands::compress_clip,
+            commands::compress_status,
             commands::list_audio_devices,
             commands::rl_stats_status,
             commands::rl_enable_stats

@@ -1,0 +1,100 @@
+/* Transparent window; only the card is painted. Colours from styles.css. */
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  font-family: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+}
+
+body {
+  display: flex;
+  align-items: flex-start;
+  justify-content: flex-end;
+  padding: 8px;
+  box-sizing: border-box;
+}
+
+.banner-card {
+  --tone: #f0a73a;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  padding: 12px 18px 12px 14px;
+  border-radius: 12px;
+  background: rgba(26, 29, 34, 0.92);
+  border: 1px solid #353b44;
+  border-left: 3px solid var(--tone);
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  color: #e3e6ea;
+  opacity: 0;
+}
+.banner-card[data-kind="error"] {
+  --tone: #e5534b;
+}
+.banner-card.in {
+  animation: banner-in 260ms cubic-bezier(0.2, 0, 0, 1) both;
+}
+@keyframes banner-in {
+  from {
+    opacity: 0;
+    transform: translateX(24px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.banner-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--tone);
+  position: relative;
+}
+/* Check mark / cross: an SVG mask filled with the card background colour. */
+.banner-icon::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: #1a1d22;
+  -webkit-mask: var(--glyph) center / 16px 16px no-repeat;
+  mask: var(--glyph) center / 16px 16px no-repeat;
+  --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M3 8.5l3.2 3L13 4.5' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+.banner-card[data-kind="error"] /* Check mark / cross: an SVG mask filled with the card background colour. */
+.banner-icon::after {
+  --glyph: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpath d='M4.5 4.5l7 7M11.5 4.5l-7 7' fill='none' stroke='%23000' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+
+.banner-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.banner-body strong {
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: 600;
+}
+.banner-body span {
+  font-size: 13px;
+  line-height: 18px;
+  color: #a3aab5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .banner-card.in {
+    animation: none;
+    opacity: 1;
+  }
+}
