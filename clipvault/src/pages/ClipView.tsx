@@ -879,7 +879,7 @@ export function ClipView({ id }: { id: string }) {
           )}
         </div>
 
-        {clip.source === "native" && !clip.compressed && (
+        {!clip.compressed && (
           <div className="side-block">
             <button
               type="button"

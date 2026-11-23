@@ -184,7 +184,7 @@ impl Compressor {
         }
     }
 
-    /// Queues every native clip not compressed yet, oldest first.
+    /// Queues every native or imported Moments clip not compressed yet, oldest first.
     pub fn enqueue_pending(&self) {
         let ids = clips::uncompressed_ids(&locks::lock(&self.db));
         match ids {
@@ -263,7 +263,7 @@ impl Compressor {
 pub use crate::ffmpeg_proc::Run;
 
 pub enum Outcome {
-    /// `None`: nothing to do (gone, foreign, done).
+    /// `None`: nothing to do (gone, unknown source, done).
     Done(Option<Clip>),
     /// A game started; try again once it ended.
     Interrupted,
@@ -360,7 +360,7 @@ pub fn same_media(original: Option<MediaInfo>, compressed: Option<MediaInfo>) ->
     Ok(())
 }
 
-/// Compresses one clip. `Ok(None)`: nothing to do (gone, foreign, done).
+/// Compresses one clip. `Ok(None)`: nothing to do (gone, unknown source, done).
 /// `on_stage` is told when the encode is done and the file swap waits for the player.
 pub fn compress_clip(
     ffmpeg: &Path,
@@ -371,7 +371,7 @@ pub fn compress_clip(
     on_stage: &dyn Fn(Stage),
 ) -> Result<Outcome> {
     let Some(clip) = clips::get(&locks::lock(db), id)? else { return Ok(Outcome::Done(None)) };
-    if clip.compressed || clip.source != "native" || !clip.path.is_file() {
+    if clip.compressed || !matches!(clip.source.as_str(), "native" | "moments") || !clip.path.is_file() {
         return Ok(Outcome::Done(None));
     }
     let original = std::fs::metadata(&clip.path)?.len();
@@ -612,6 +612,75 @@ At least one output file must be specified
         assert!(c.shared.queue.lock().unwrap().order.is_empty());
         c.shared.set_stage("a", None);
         assert_eq!(c.stage("a"), None);
+    }
+
+    /// The FFmpeg bundled with the app (`binaries/`), if it was fetched.
+    fn bundled_ffmpeg() -> Option<PathBuf> {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("binaries").join("ffmpeg-x86_64-pc-windows-msvc.exe");
+        if p.is_file() {
+            Some(p)
+        } else {
+            eprintln!("SKIP: bundled FFmpeg missing at {}", p.display());
+            None
+        }
+    }
+
+    /// An imported SteelSeries Moments clip is re-encoded to AV1 in place:
+    /// smaller file, same streams and duration, marked compressed with its
+    /// original size remembered.
+    #[test]
+    fn compresses_an_imported_moments_clip() {
+        let Some(ff) = bundled_ffmpeg() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Rocket League 2026.11.20 - 20.15.00.01.mp4");
+        // A near-lossless H.264 clip with audio, like a Moments recording but tiny.
+        let made = std::process::Command::new(&ff)
+            .args(["-hide_banner", "-loglevel", "error", "-y"])
+            .args(["-f", "lavfi", "-i", "testsrc2=size=640x360:rate=30:duration=4"])
+            .args(["-f", "lavfi", "-i", "sine=frequency=440:duration=4"])
+            .args(["-c:v", "libx264", "-preset", "ultrafast", "-crf", "8", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest"])
+            .arg(&path)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let original = std::fs::metadata(&path).unwrap().len();
+        let before = probe(&ff, &path).expect("probe original");
+
+        let db = Mutex::new(crate::db::open_memory().unwrap());
+        let clip = Clip {
+            id: "m1".into(),
+            title: "Goal".into(),
+            description: String::new(),
+            path: path.clone(),
+            game: "Rocket League".into(),
+            recorded_at: chrono::DateTime::parse_from_rfc3339("2026-11-20T20:15:00+01:00").unwrap(),
+            duration_s: 4.0,
+            fps: 30,
+            width: 640,
+            height: 360,
+            size: original,
+            trim_in: None,
+            trim_out: None,
+            thumbnail_path: None,
+            source: "moments".into(),
+            source_id: Some("moments-1".into()),
+            tags: vec![],
+            starred: false,
+            compressed: false,
+            original_size: None,
+            markers: vec![],
+        };
+        clips::insert(&locks::lock(&db), &clip).unwrap();
+
+        let r = compress_clip(&ff, &db, "m1", "libsvtav1", &|| false, &|_| {}).unwrap();
+        let Outcome::Done(Some(done)) = r else { panic!("moments clip was skipped") };
+        let size = std::fs::metadata(&path).unwrap().len();
+        assert!(done.compressed);
+        assert_eq!(done.size, size);
+        assert_eq!(done.original_size, Some(original));
+        assert!(worth_keeping(original, size), "{original} -> {size}");
+        assert_eq!(same_media(Some(before), probe(&ff, &path)), Ok(()));
+        assert!(!temp_path(&path).exists());
     }
 
     #[test]

@@ -283,9 +283,9 @@ export function Library() {
     );
 
   const compressMany = async (ids: string[]) => {
-    const todo = clipsOf(ids).filter((c) => !c.compressed && c.source === "native");
+    const todo = clipsOf(ids).filter((c) => !c.compressed);
     if (todo.length === 0) {
-      toast.info("Nothing to compress: these clips are already compressed or not ClipVault's own files.");
+      toast.info("Nothing to compress: these clips are already compressed.");
       return;
     }
     const r = await runBulk(

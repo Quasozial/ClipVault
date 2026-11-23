@@ -133,7 +133,7 @@ pub fn add_tags_many(conn: &Connection, ids: &[String], tags: &[String]) -> Resu
 // ----- delete -----
 
 /// True for files ClipVault does not own (imported from SteelSeries Moments):
-/// they are never written, moved or deleted.
+/// they are never moved or deleted (compression may re-encode them in place).
 pub fn is_foreign(clip: &Clip) -> bool {
     clip.source == "moments"
 }

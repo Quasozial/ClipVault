@@ -341,10 +341,10 @@ pub fn set_compressed(conn: &Connection, id: &str, size: u64, original_size: Opt
     Ok(())
 }
 
-/// Native clips not compressed yet, oldest first.
+/// Native and imported Moments clips not compressed yet, oldest first.
 pub fn uncompressed_ids(conn: &Connection) -> Result<Vec<String>> {
     let mut st = conn.prepare(
-        "SELECT id FROM clips WHERE compressed = 0 AND source = 'native' ORDER BY julianday(recorded_at)",
+        "SELECT id FROM clips WHERE compressed = 0 AND source IN ('native', 'moments') ORDER BY julianday(recorded_at)",
     )?;
     let ids = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
     Ok(ids)
@@ -531,6 +531,26 @@ mod tests {
         assert!(insert(&conn, &sample("b", "moments", Some("m1"))).is_err());
         // failed insert left nothing behind
         assert!(get(&conn, "b").unwrap().is_none());
+    }
+
+    /// Imported SteelSeries Moments clips are compressed like native ones;
+    /// done clips are not queued again.
+    #[test]
+    fn uncompressed_ids_include_imported_moments_clips() {
+        let conn = open_memory().unwrap();
+        let mut native = sample("n", "native", None);
+        native.path = r"E:\GameClips\n.mp4".into();
+        let mut moments = sample("m", "moments", Some("m1"));
+        moments.path = r"E:\Moments\m.mp4".into();
+        let mut done = sample("d", "moments", Some("m2"));
+        done.path = r"E:\Moments\d.mp4".into();
+        for c in [&native, &moments, &done] {
+            insert(&conn, c).unwrap();
+        }
+        set_compressed(&conn, "d", 1, None).unwrap();
+        let mut ids = uncompressed_ids(&conn).unwrap();
+        ids.sort();
+        assert_eq!(ids, ["m", "n"]);
     }
 
     #[test]
