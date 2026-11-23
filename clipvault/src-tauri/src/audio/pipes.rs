@@ -109,7 +109,7 @@ impl Shared {
     /// Record and log a server failure (logged once per distinct message).
     fn set_error(&self, name: &str, e: &anyhow::Error) {
         let msg = format!("{e:#}");
-        let mut last = self.last_error.lock().unwrap();
+        let mut last = crate::locks::lock(&self.last_error);
         if last.as_deref() != Some(msg.as_str()) {
             tracing::warn!("[audio pipe {name}] {msg}");
         }
@@ -127,7 +127,7 @@ impl Drop for Inner {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::SeqCst);
         self.shared.data_ready.notify_all();
-        if let Some(t) = self.thread.lock().unwrap().take() {
+        if let Some(t) = crate::locks::lock(&self.thread).take() {
             let _ = t.join();
         }
     }
@@ -177,7 +177,7 @@ impl PipeWriter {
             sh.dropped.fetch_add((samples.len() / CHANNELS) as u64, Ordering::Relaxed);
             return;
         }
-        let dropped = sh.queue.lock().unwrap().push(samples);
+        let dropped = crate::locks::lock(&sh.queue).push(samples);
         if dropped > 0 {
             sh.dropped.fetch_add(dropped, Ordering::Relaxed);
         }
@@ -197,7 +197,7 @@ impl PipeWriter {
     /// Last server-side failure (creating/listening on an instance); cleared once
     /// a new instance is listening. Client disconnects are normal, not errors.
     pub fn last_error(&self) -> Option<String> {
-        self.inner.shared.last_error.lock().unwrap().clone()
+        crate::locks::lock(&self.inner.shared.last_error).clone()
     }
 }
 
@@ -359,7 +359,7 @@ fn serve(name: &str, wide: Vec<u16>, first: Instance, sh: &Shared) {
         if listening.is_none() && Instant::now() >= retry_at {
             match Instance::create(&wide, false, PIPE_BUFFER_BYTES).and_then(|mut i| i.begin_connect().map(|_| i)) {
                 Ok(i) => {
-                    *sh.last_error.lock().unwrap() = None;
+                    *crate::locks::lock(&sh.last_error) = None;
                     listening = Some(i);
                 }
                 Err(e) => {
@@ -374,7 +374,7 @@ fn serve(name: &str, wide: Vec<u16>, first: Instance, sh: &Shared) {
             match l.poll(wait) {
                 Ok(Some(_)) => {
                     active = listening.take(); // closes any previous client
-                    sh.queue.lock().unwrap().clear();
+                    crate::locks::lock(&sh.queue).clear();
                     sh.connected.store(true, Ordering::SeqCst);
                 }
                 Ok(None) => {}
@@ -390,9 +390,9 @@ fn serve(name: &str, wide: Vec<u16>, first: Instance, sh: &Shared) {
         // 2. Stream queued audio to the active client.
         let Some(a) = active.as_mut() else { continue };
         let samples = {
-            let mut q = sh.queue.lock().unwrap();
+            let mut q = crate::locks::lock(&sh.queue);
             if q.len_frames() == 0 {
-                q = sh.data_ready.wait_timeout(q, POLL).unwrap().0;
+                q = crate::locks::wait_timeout(&sh.data_ready, q, POLL);
             }
             q.take_all()
         };
@@ -405,7 +405,7 @@ fn serve(name: &str, wide: Vec<u16>, first: Instance, sh: &Shared) {
             // Broken pipe / no data: the client went away. Normal during restarts.
             sh.connected.store(false, Ordering::SeqCst);
             active = None;
-            sh.queue.lock().unwrap().clear();
+            crate::locks::lock(&sh.queue).clear();
         }
     }
     sh.connected.store(false, Ordering::SeqCst);

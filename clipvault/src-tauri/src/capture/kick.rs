@@ -43,7 +43,7 @@ impl DesktopKicker {
 
     /// Requests a kick of ddagrab output `output_idx`; never blocks.
     pub fn kick(&self, output_idx: u32) {
-        let _ = self.tx.lock().unwrap().send(output_idx);
+        let _ = crate::locks::lock(&self.tx).send(output_idx);
     }
 }
 

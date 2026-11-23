@@ -419,7 +419,7 @@ struct SourceShared {
 
 impl SourceShared {
     fn set_error(&self, who: &str, msg: String) {
-        let mut last = self.last_error.lock().unwrap();
+        let mut last = crate::locks::lock(&self.last_error);
         if last.as_deref() != Some(msg.as_str()) {
             tracing::warn!("[audio {who}] {msg}; emitting silence, retrying every {}s", RECHECK.as_secs());
         }
@@ -427,7 +427,7 @@ impl SourceShared {
     }
 
     fn clear_error(&self) {
-        *self.last_error.lock().unwrap() = None;
+        *crate::locks::lock(&self.last_error) = None;
     }
 }
 
@@ -515,12 +515,12 @@ impl AudioSource {
 
     /// Last capture failure (cleared when a capture opens or the target is silence).
     pub fn last_error(&self) -> Option<String> {
-        self.shared.last_error.lock().unwrap().clone()
+        crate::locks::lock(&self.shared.last_error).clone()
     }
 
     /// Human-readable current target, e.g. `process tree 1234` or `silence`.
     pub fn status(&self) -> String {
-        self.shared.status.lock().unwrap().clone()
+        crate::locks::lock(&self.shared.status).clone()
     }
 
     pub fn kind(&self) -> &SourceKind {
@@ -566,7 +566,7 @@ fn run(kind: &SourceKind, mut out: Output, sh: &SourceShared) {
                             }
                         }
                         let live = if cap.is_some() || t == Target::Silence { "" } else { " (failed; silence)" };
-                        *sh.status.lock().unwrap() = format!("{t}{live}");
+                        *crate::locks::lock(&sh.status) = format!("{t}{live}");
                         current = Some(t);
                     }
                 }
@@ -574,7 +574,7 @@ fn run(kind: &SourceKind, mut out: Output, sh: &SourceShared) {
                     cap = None;
                     current = None;
                     sh.set_error(&who, format!("resolving {kind:?}: {e:#}"));
-                    *sh.status.lock().unwrap() = "unresolved (silence)".into();
+                    *crate::locks::lock(&sh.status) = "unresolved (silence)".into();
                 }
             }
         }
@@ -587,7 +587,7 @@ fn run(kind: &SourceKind, mut out: Output, sh: &SourceShared) {
                     Err(e) => {
                         let t = current.as_ref().map(|t| t.to_string()).unwrap_or_default();
                         sh.set_error(&who, format!("{t}: capture failed: {e:#}"));
-                        *sh.status.lock().unwrap() = format!("{t} (lost; silence)");
+                        *crate::locks::lock(&sh.status) = format!("{t} (lost; silence)");
                         cap = None;
                         next_check = Instant::now() + RECHECK;
                     }

@@ -120,7 +120,7 @@ impl FramePipe {
         if !sh.connected.load(Ordering::SeqCst) {
             return;
         }
-        let mut q = sh.queue.lock().unwrap();
+        let mut q = crate::locks::lock(&sh.queue);
         if q.len() >= QUEUE_FRAMES {
             q.pop_front();
             sh.dropped.fetch_add(1, Ordering::Relaxed);
@@ -165,7 +165,7 @@ fn serve_frames(name: &str, wide: Vec<u16>, buffer: u32, first: Instance, sh: &P
             match l.poll(wait) {
                 Ok(Some(_)) => {
                     active = listening.take();
-                    sh.queue.lock().unwrap().clear();
+                    crate::locks::lock(&sh.queue).clear();
                     sh.connected.store(true, Ordering::SeqCst);
                 }
                 Ok(None) => {}
@@ -180,9 +180,9 @@ fn serve_frames(name: &str, wide: Vec<u16>, buffer: u32, first: Instance, sh: &P
 
         let Some(a) = active.as_mut() else { continue };
         let frame = {
-            let mut q = sh.queue.lock().unwrap();
+            let mut q = crate::locks::lock(&sh.queue);
             if q.is_empty() {
-                q = sh.ready.wait_timeout(q, POLL).unwrap().0;
+                q = crate::locks::wait_timeout(&sh.ready, q, POLL);
             }
             q.pop_front()
         };
@@ -190,7 +190,7 @@ fn serve_frames(name: &str, wide: Vec<u16>, buffer: u32, first: Instance, sh: &P
         if a.write_all(&frame, &sh.stop).is_err() {
             sh.connected.store(false, Ordering::SeqCst);
             active = None;
-            sh.queue.lock().unwrap().clear();
+            crate::locks::lock(&sh.queue).clear();
         }
     }
     sh.connected.store(false, Ordering::SeqCst);

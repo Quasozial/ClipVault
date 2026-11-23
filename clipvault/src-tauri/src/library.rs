@@ -193,19 +193,19 @@ impl ThumbQueue {
     where
         F: FnOnce() -> Result<Option<String>> + Send + 'static,
     {
-        if self.failed.lock().unwrap().iter().any(|f| f == id) {
+        if crate::locks::lock(&self.failed).iter().any(|f| f == id) {
             return None;
         }
         let _permit = self.permit.acquire().await.ok()?;
         // Re-check: an earlier queued request for this id may have failed meanwhile.
-        if self.failed.lock().unwrap().iter().any(|f| f == id) {
+        if crate::locks::lock(&self.failed).iter().any(|f| f == id) {
             return None;
         }
         match tokio::task::spawn_blocking(job).await {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
                 tracing::warn!("thumbnail for {id}: {e:#}");
-                self.failed.lock().unwrap().push(id.to_string());
+                crate::locks::lock(&self.failed).push(id.to_string());
                 None
             }
             Err(e) => {
