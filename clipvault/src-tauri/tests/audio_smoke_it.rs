@@ -39,6 +39,7 @@ mod audio_smoke {
             out_w: 320,
             out_h: 180,
             hdr_sdr_white: None,
+            ddagrab_fallback: false,
             encoder: Encoder::H264Nvenc,
             bitrate_kbps: 1000,
             audio_inputs: pipes.iter().cloned().map(AudioInput::Pipe).collect(),

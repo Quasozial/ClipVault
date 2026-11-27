@@ -1,6 +1,13 @@
-//! Native capture for HDR desktops: Desktop Duplication in FP16, converted to
-//! SDR NV12 at the recording size on the GPU, streamed to FFmpeg as raw video
-//! over a named pipe.
+//! Native screen capture: Desktop Duplication in FP16, converted to SDR NV12
+//! at the recording size on the GPU, streamed to FFmpeg as raw video over a
+//! named pipe. Used on every monitor: an SDR desktop duplicated as FP16
+//! arrives as linear sRGB with white at 1.0 (`sdr_white` 1.0).
+//!
+//! Also why on SDR desktops: ddagrab ends its stream on
+//! DXGI_ERROR_ACCESS_LOST (887a0026: fullscreen games switching mode, a window
+//! over exclusive fullscreen), which cost a FFmpeg restart and seconds of
+//! video each time; here the duplication is recreated within ~100 ms while the
+//! last picture keeps going out. It also never needs a desktop kick.
 //!
 //! Why: ddagrab's frames cannot be scaled or converted on the GPU by this
 //! FFmpeg (scale_d3d11 fails to allocate its pool on NVIDIA; mapping D3D11
@@ -230,7 +237,7 @@ impl HdrGrabber {
             }
             Err(_) => {
                 let _ = thread.join();
-                Err(anyhow!("HDR capture thread exited during setup"))
+                Err(anyhow!("native capture thread exited during setup"))
             }
         }
     }
@@ -333,7 +340,7 @@ mod imp {
         let mut retry_dup_at = Instant::now();
         let (mut frames, mut new_frames, mut stats_at) = (0u64, 0u64, Instant::now());
         tracing::info!(
-            "HDR capture on output {} -> {}x{}@{} NV12, SDR white {}",
+            "native capture on output {} -> {}x{}@{} NV12, SDR white {}",
             cfg.output_idx,
             cfg.out_w,
             cfg.out_h,
@@ -390,7 +397,7 @@ mod imp {
 
             if stats_at.elapsed() >= Duration::from_secs(60) {
                 tracing::debug!(
-                    "HDR capture: {frames} frames sent, {new_frames} new desktop frames, {} dropped at pipe",
+                    "native capture: {frames} frames sent, {new_frames} new desktop frames, {} dropped at pipe",
                     pipe.shared.dropped.load(Ordering::Relaxed)
                 );
                 (frames, new_frames, stats_at) = (0, 0, Instant::now());
@@ -401,7 +408,7 @@ mod imp {
     fn report(last: &mut Option<String>, e: &anyhow::Error) {
         let msg = format!("{e:#}");
         if last.as_deref() != Some(&msg) {
-            tracing::warn!("HDR capture: {msg}");
+            tracing::warn!("native capture: {msg}");
         }
         *last = Some(msg);
     }
@@ -569,7 +576,7 @@ mod imp {
             }
             if info.PointerShapeBufferSize > 0 {
                 if let Err(e) = self.update_cursor(dup, info.PointerShapeBufferSize) {
-                    tracing::debug!("HDR capture: cursor shape: {e:#}");
+                    tracing::debug!("native capture: cursor shape: {e:#}");
                 }
             }
             if info.LastPresentTime == 0 && self.frame.is_some() {
@@ -737,7 +744,7 @@ mod imp {
 mod imp {
     use super::*;
     pub(super) fn run(_: HdrGrabConfig, _: &FramePipe, _: &AtomicBool, ready: std::sync::mpsc::Sender<Result<()>>) {
-        let _ = ready.send(Err(anyhow!("HDR capture needs Windows")));
+        let _ = ready.send(Err(anyhow!("native capture needs Windows")));
     }
 }
 
@@ -849,6 +856,7 @@ mod tests {
             out_w: 1920,
             out_h: 1080,
             hdr_sdr_white: Some(3.0),
+            ddagrab_fallback: false,
             encoder: crate::settings::Encoder::H264Nvenc,
             bitrate_kbps: 40000,
             audio_inputs: vec![],

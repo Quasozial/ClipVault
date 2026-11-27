@@ -29,12 +29,18 @@ pub struct CaptureSpec {
     pub fps: u32,
     pub out_w: u32,
     pub out_h: u32,
-    /// `Some(scale)` on an HDR desktop: the native grabber (`capture::hdr_grab`)
-    /// captures FP16 scRGB, divides by `scale` (SDR white in scRGB units, e.g.
-    /// 3.0 for 240 nits) so SDR content keeps its on-screen brightness, and
-    /// streams NV12 over [`hdr_pipe_name`]. `None`: ddagrab, 8-bit path.
+    /// `Some(scale)`: the native grabber (`capture::hdr_grab`) captures FP16
+    /// scRGB, divides by `scale` (SDR white in scRGB units: e.g. 3.0 for 240
+    /// nits on an HDR desktop, 1.0 on an SDR one) so SDR content keeps its
+    /// on-screen brightness, and streams NV12 over [`hdr_pipe_name`]. Used for
+    /// every monitor: unlike ddagrab it survives DXGI_ERROR_ACCESS_LOST
+    /// (fullscreen games) and needs no desktop kick. `None`: ddagrab, 8-bit path.
     /// Ddagrab source only.
     pub hdr_sdr_white: Option<f32>,
+    /// SDR desktop: when the native grabber cannot start, ddagrab records the
+    /// same picture instead (for the rest of this capture). Not on HDR
+    /// desktops, where ddagrab's picture is clipped and too bright.
+    pub ddagrab_fallback: bool,
     pub encoder: Encoder,
     pub bitrate_kbps: u32,
     pub audio_inputs: Vec<AudioInput>,
@@ -232,6 +238,12 @@ pub fn build_capture_args(spec: &CaptureSpec) -> Vec<String> {
     for n in 0..spec.audio_inputs.len() {
         push(&["-map", &format!("{}:a", n + 1)]);
     }
+    // The video input ends on its own when ddagrab loses the desktop
+    // (DXGI_ERROR_ACCESS_LOST, 887a0026: a game switching display mode or a
+    // window popping up over exclusive fullscreen). The audio pipes never end:
+    // stop the run with the video, so the supervisor restarts it within a
+    // watchdog tick instead of after the stall timeout.
+    push(&["-shortest"]);
 
     if spec.video_source == VideoSource::TestSrc {
         push(&["-pix_fmt", "yuv420p"]);
@@ -352,6 +364,7 @@ mod tests {
             out_w: 1920,
             out_h: 1080,
             hdr_sdr_white: None,
+            ddagrab_fallback: false,
             encoder: Encoder::H264Nvenc,
             bitrate_kbps: 40000,
             audio_inputs: vec![],
@@ -442,6 +455,16 @@ mod tests {
         assert!(a.contains(COLOR_TAGS), "{a}");
         assert!(a.contains("-f segment -segment_time 2 -segment_time_delta 0.001 -segment_format mpegts"), "{a}");
         assert!(a.contains(r"-segment_list C:\buf\r3_list.csv -segment_list_type csv -segment_list_flags live C:\buf\r3_seg_%08d.ts"), "{a}");
+    }
+
+    /// ddagrab ends its stream on DXGI_ERROR_ACCESS_LOST (887a0026: a game
+    /// switching display mode, a window over exclusive fullscreen). The audio
+    /// pipes never end, so without `-shortest` FFmpeg lingers without video
+    /// until the 5 s stall timeout; with it FFmpeg exits and is restarted at once.
+    #[test]
+    fn video_end_ends_the_run() {
+        let a = joined(&build_capture_args(&spec()));
+        assert!(a.contains(" -shortest "), "{a}");
     }
 
     const COLOR_TAGS: &str = "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv";

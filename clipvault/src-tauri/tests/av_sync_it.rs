@@ -89,6 +89,7 @@ mod av_sync {
             out_w: 320,
             out_h: 180,
             hdr_sdr_white: None,
+            ddagrab_fallback: false,
             encoder: Encoder::H264Nvenc,
             bitrate_kbps: 1000,
             audio_inputs: vec![AudioInput::Pipe(AudioPipe { pipe_name: name.clone(), title: "Sync" })],

@@ -586,21 +586,31 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         let mut spawn_error: Option<String> = None;
         let mut exit: Option<String> = None;
         let mut kicks = KickBudget::default();
-        // HDR desktop: our own grabber feeds FFmpeg; its pipe must listen
-        // before FFmpeg opens it. It never needs a desktop kick.
-        let grab = hdr_grab_config(&spec);
-        let uses_ddagrab = spec.video_source == VideoSource::Ddagrab && grab.is_none();
+        // Our own grabber feeds FFmpeg; its pipe must listen before FFmpeg
+        // opens it. It never needs a desktop kick.
         let mut grabber: Option<HdrGrabber> = None;
-        if let Some(cfg) = grab {
-            match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg)).await {
-                Ok(Ok(g)) => grabber = Some(g),
-                Ok(Err(e)) => {
-                    tracing::error!("HDR capture could not start: {e:#}");
-                    spawn_error = Some(format!("HDR capture: {e:#}"));
+        if let Some(cfg) = hdr_grab_config(&spec) {
+            let failed = match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg)).await {
+                Ok(Ok(g)) => {
+                    grabber = Some(g);
+                    None
                 }
-                Err(e) => spawn_error = Some(format!("HDR capture: {e}")),
+                Ok(Err(e)) => Some(format!("{e:#}")),
+                Err(e) => Some(e.to_string()),
+            };
+            if let Some(e) = failed {
+                if spec.ddagrab_fallback {
+                    // SDR desktop: ddagrab gives the same picture. Stay on it
+                    // for this capture rather than failing again every run.
+                    tracing::warn!("native capture could not start ({e}); recording with ddagrab");
+                    spec.hdr_sdr_white = None;
+                } else {
+                    tracing::error!("HDR capture could not start: {e}");
+                    spawn_error = Some(format!("HDR capture: {e}"));
+                }
             }
         }
+        let uses_ddagrab = spec.video_source == VideoSource::Ddagrab && spec.hdr_sdr_white.is_none();
         let mut child = if spawn_error.is_some() {
             None
         } else {
@@ -712,7 +722,7 @@ async fn drop_grabber(g: Option<HdrGrabber>) {
     if let Some(g) = g {
         let dropped = g.dropped_frames();
         if dropped > 0 {
-            tracing::warn!("HDR capture: {dropped} frames dropped because FFmpeg read too slowly");
+            tracing::warn!("native capture: {dropped} frames dropped because FFmpeg read too slowly");
         }
         let _ = tokio::task::spawn_blocking(move || drop(g)).await;
     }
@@ -985,6 +995,7 @@ mod tests {
             out_w: 320,
             out_h: 180,
             hdr_sdr_white: None,
+            ddagrab_fallback: false,
             encoder: crate::settings::Encoder::H264Nvenc,
             bitrate_kbps: 1000,
             audio_inputs: vec![AudioInput::Silence { title: "Mic" }],

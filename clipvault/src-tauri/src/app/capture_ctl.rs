@@ -148,15 +148,10 @@ impl CaptureController {
         enc
     }
 
-    /// SDR white in scRGB units for the native FP16 HDR grabber
-    /// (`capture::hdr_grab`), or `None` for ddagrab's 8-bit path (SDR monitor).
+    /// SDR white in scRGB units for the native FP16 grabber
+    /// (`capture::hdr_grab`), used on every monitor; `None` for test sources.
     fn hdr_sdr_white(&self, display: &crate::capture::display::DisplayInfo) -> Option<f32> {
-        if !display.hdr || self.video_source != VideoSource::Ddagrab {
-            return None;
-        }
-        // Unknown level: Windows' default SDR content brightness (200 nits).
-        let level = if display.sdr_white_level > 0 { display.sdr_white_level } else { 2500 };
-        Some(level as f32 / 1000.0)
+        (self.video_source == VideoSource::Ddagrab).then(|| sdr_white(display.hdr, display.sdr_white_level))
     }
 
     pub fn target(&self) -> &CaptureTarget {
@@ -274,6 +269,7 @@ impl CaptureController {
             out_w,
             out_h,
             hdr_sdr_white,
+            ddagrab_fallback: !display.hdr,
             encoder,
             bitrate_kbps: s.bitrate_kbps,
             audio_inputs: pipes.iter().cloned().map(AudioInput::Pipe).collect(),
@@ -346,6 +342,17 @@ fn audio_setup_needed(current: Option<&[(SourceKind, &'static str)]>, plan: &[(S
     current != Some(plan)
 }
 
+/// SDR white in scRGB units (1.0 = 80 nits). An SDR desktop duplicated as FP16
+/// arrives as linear sRGB with white at exactly 1.0. On an HDR desktop it is
+/// Windows' "SDR content brightness" (`level` in thousandths; unknown: the
+/// default 200 nits).
+fn sdr_white(hdr: bool, level: u32) -> f32 {
+    if !hdr {
+        return 1.0;
+    }
+    (if level > 0 { level } else { 2500 }) as f32 / 1000.0
+}
+
 /// ddagrab output of the primary monitor (0 if unknown).
 fn primary_output() -> u32 {
     list_displays().ok().and_then(|d| d.into_iter().find(|d| d.primary).map(|d| d.output_idx)).unwrap_or(0)
@@ -354,6 +361,14 @@ fn primary_output() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdr_white_per_desktop_kind() {
+        assert_eq!(sdr_white(false, 0), 1.0);
+        assert_eq!(sdr_white(false, 3000), 1.0, "level only applies with HDR on");
+        assert_eq!(sdr_white(true, 3000), 3.0);
+        assert_eq!(sdr_white(true, 0), 2.5);
+    }
 
     #[test]
     fn failed_audio_setup_is_retried_on_the_next_start() {
