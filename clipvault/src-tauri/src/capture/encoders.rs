@@ -95,6 +95,14 @@ pub fn probe_all(ffmpeg: &Path) -> Vec<Encoder> {
 /// is empty (probing impossible) a fixed choice is trusted as it is.
 /// Encoders the buffer cannot hold ([`Encoder::can_record`]) are never picked.
 pub fn resolve(wanted: Encoder, available: &[Encoder]) -> (Encoder, Option<String>) {
+    resolve_for_playback(wanted, available, true)
+}
+
+/// [`resolve`], knowing whether the app's player (WebView2) can decode HEVC.
+/// It cannot without Microsoft's HEVC Video Extensions: such clips play with
+/// sound over a black picture. Then the automatic pick (also the fallback for
+/// an unavailable choice) skips HEVC; an explicit HEVC choice is kept.
+pub fn resolve_for_playback(wanted: Encoder, available: &[Encoder], hevc_playable: bool) -> (Encoder, Option<String>) {
     let recordable: Vec<Encoder> = available.iter().copied().filter(|e| e.can_record()).collect();
     if available.is_empty() && wanted.can_record() {
         return (if wanted == Encoder::Auto { Encoder::X264 } else { wanted }, None);
@@ -102,7 +110,8 @@ pub fn resolve(wanted: Encoder, available: &[Encoder]) -> (Encoder, Option<Strin
     if wanted != Encoder::Auto && recordable.contains(&wanted) {
         return (wanted, None);
     }
-    let best = best_of(&recordable);
+    let candidates: Vec<Encoder> = recordable.into_iter().filter(|e| hevc_playable || !e.is_hevc()).collect();
+    let best = best_of(&candidates);
     let notice = if wanted != Encoder::Auto {
         Some(format!("{} is not available on this PC – recording with {}", wanted.label(), best.label()))
     } else {
@@ -163,6 +172,21 @@ mod tests {
     fn unknown_availability_trusts_the_setting() {
         assert_eq!(resolve(HevcNvenc, &[]), (HevcNvenc, None));
         assert_eq!(resolve(Auto, &[]), (X264, None));
+    }
+
+    #[test]
+    fn auto_skips_hevc_the_player_cannot_decode() {
+        // No HEVC Video Extensions: HEVC clips would play black in the app.
+        let all = [Av1Nvenc, HevcNvenc, H264Nvenc, X264];
+        assert_eq!(resolve_for_playback(Auto, &all, false), (H264Nvenc, None));
+        assert_eq!(resolve_for_playback(Auto, &[HevcAmf, H264Amf, X264], false), (H264Amf, None));
+        assert_eq!(resolve_for_playback(Auto, &[HevcQsv, X264], false), (X264, None));
+        assert_eq!(resolve_for_playback(Auto, &all, true), (HevcNvenc, None));
+        // Fallback for an unavailable choice avoids HEVC too.
+        let (e, _) = resolve_for_playback(HevcAmf, &all, false);
+        assert_eq!(e, H264Nvenc);
+        // An explicit, available HEVC choice is the user's call.
+        assert_eq!(resolve_for_playback(HevcNvenc, &all, false), (HevcNvenc, None));
     }
 
     #[test]

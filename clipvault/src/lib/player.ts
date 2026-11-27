@@ -64,3 +64,25 @@ export function allTracksMixed(tracks: { index: number }[]): ExportTrack[] {
 export function exportOptions(preset: ExportPreset, tracks: ExportTrack[]): ExportOptions {
   return { label: preset.id, max_mb: preset.max_mb, height: preset.height, tracks };
 }
+
+/** What recording writes as HEVC: Main profile, level 5.1, `hvc1` tag in MP4. */
+const HEVC_MP4 = 'video/mp4; codecs="hvc1.1.6.L153.B0"';
+
+/**
+ * Whether this page's `<video>` can decode HEVC. WebView2 (Edge) can only with
+ * Microsoft's HEVC Video Extensions; without them an HEVC clip plays its sound
+ * over a black picture and no error fires. Unknown (neither API) counts as yes.
+ */
+export function canDecodeHevc(
+  isTypeSupported: ((type: string) => boolean) | undefined,
+  canPlayType: ((type: string) => string) | undefined,
+): boolean {
+  if (isTypeSupported) return isTypeSupported(HEVC_MP4);
+  if (canPlayType) return canPlayType(HEVC_MP4) !== "";
+  return true;
+}
+
+/** The video loaded without a picture: its codec has no decoder here, so only the sound plays. */
+export function hasNoPicture(v: { videoWidth: number; videoHeight: number }): boolean {
+  return v.videoWidth === 0 && v.videoHeight === 0;
+}

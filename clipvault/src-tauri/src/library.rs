@@ -234,11 +234,50 @@ fn generate_thumb_locked(ffmpeg: &Path, video: &Path, out: &Path, at_s: f64) -> 
     crate::thumbs::generate_thumbnail(ffmpeg, video, out, at_s)
 }
 
+/// Whether a stored thumbnail path can be shown: an existing file directly in
+/// `thumbs_dir` (the only folder the webview may read thumbnails from). Paths
+/// from an older data folder, a sandbox redirect or a hand-edited DB fail this.
+fn usable_thumb(p: &Path, thumbs_dir: &Path) -> bool {
+    use std::path::Component;
+    if p.components().any(|c| matches!(c, Component::ParentDir | Component::CurDir)) || !p.is_file() {
+        return false;
+    }
+    let (Some(parent), dir) = (p.parent(), dunce::simplified(thumbs_dir)) else { return false };
+    let parent = dunce::simplified(parent);
+    if cfg!(windows) {
+        parent.to_string_lossy().to_lowercase() == dir.to_string_lossy().to_lowercase()
+    } else {
+        parent == dir
+    }
+}
+
+/// Startup repair of stored thumbnail paths: a path that is not usable (see
+/// [`usable_thumb`]) is pointed at `<thumbs_dir>/<id>.jpg` when that exists,
+/// else cleared so the grid regenerates it on demand. Returns rows changed.
+pub fn repair_thumbnails(conn: &Connection, thumbs_dir: &Path) -> Result<usize> {
+    let rows: Vec<(String, String)> = conn
+        .prepare("SELECT id, thumbnail_path FROM clips WHERE thumbnail_path IS NOT NULL")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut changed = 0;
+    for (id, stored) in rows {
+        if usable_thumb(Path::new(&stored), thumbs_dir) {
+            continue;
+        }
+        let local = thumb_path(thumbs_dir, &id);
+        let fixed = usable_thumb(&local, thumbs_dir).then_some(local);
+        clips::set_thumbnail(conn, &id, fixed.as_deref())?;
+        changed += 1;
+    }
+    Ok(changed)
+}
+
 /// The clip's thumbnail path, generating and storing one if it has none (or
-/// the file vanished). `Ok(None)` when the video itself is missing. Calls queue
-/// up behind [`THUMB_LOCK`]; the DB lock is never held while waiting or encoding.
+/// the file vanished or lies outside `thumbs_dir`). `Ok(None)` when the video
+/// itself is missing. Calls queue up behind [`THUMB_LOCK`]; the DB lock is
+/// never held while waiting or encoding.
 pub fn ensure_thumbnail(db: &Mutex<Connection>, ffmpeg: &Path, thumbs_dir: &Path, id: &str) -> Result<Option<String>> {
-    let have = |c: &Clip| c.thumbnail_path.clone().filter(|p| p.is_file());
+    let have = |c: &Clip| c.thumbnail_path.clone().filter(|p| usable_thumb(p, thumbs_dir));
     let clip = get_clip(&crate::locks::lock(&db), id)?;
     if let Some(p) = have(&clip) {
         return Ok(Some(p.to_string_lossy().into_owned()));
@@ -940,6 +979,55 @@ mod tests {
         c.path = path.to_path_buf();
         c.thumbnail_path = thumb.map(|p| p.to_path_buf());
         crate::db::clips::insert(conn, &c).unwrap();
+    }
+
+    fn thumb_of(conn: &rusqlite::Connection, id: &str) -> Option<PathBuf> {
+        crate::db::clips::get(conn, id).unwrap().unwrap().thumbnail_path
+    }
+
+    #[test]
+    fn repair_thumbnails_fixes_stale_paths() {
+        let conn = seeded();
+        let dir = tempfile::tempdir().unwrap();
+        let thumbs = dir.path().join("thumbs");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        let other = dir.path().join("elsewhere");
+        std::fs::create_dir_all(&other).unwrap();
+
+        // a: valid thumbnail in the thumbs folder -> kept.
+        let a = thumb_path(&thumbs, "a");
+        std::fs::write(&a, b"jpg").unwrap();
+        with_path(&conn, "a", &temp_clip_file(), Some(&a));
+        // b: stored path is gone, but `<id>.jpg` exists in the thumbs folder -> repointed.
+        std::fs::write(thumb_path(&thumbs, "b"), b"jpg").unwrap();
+        with_path(&conn, "b", &temp_clip_file(), Some(&other.join("b.jpg")));
+        // c: file exists but outside the thumbs folder (webview may not read it) -> cleared.
+        let foreign = other.join("c.jpg");
+        std::fs::write(&foreign, b"jpg").unwrap();
+        with_path(&conn, "c", &temp_clip_file(), Some(&foreign));
+
+        assert_eq!(repair_thumbnails(&conn, &thumbs).unwrap(), 2);
+        assert_eq!(thumb_of(&conn, "a"), Some(a));
+        assert_eq!(thumb_of(&conn, "b"), Some(thumb_path(&thumbs, "b")));
+        assert_eq!(thumb_of(&conn, "c"), None);
+        assert_eq!(repair_thumbnails(&conn, &thumbs).unwrap(), 0, "second pass finds nothing");
+    }
+
+    #[test]
+    fn usable_thumb_requires_file_in_thumbs_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let thumbs = dir.path().join("thumbs");
+        std::fs::create_dir_all(&thumbs).unwrap();
+        let inside = thumbs.join("x.jpg");
+        assert!(!usable_thumb(&inside, &thumbs), "missing file");
+        std::fs::write(&inside, b"jpg").unwrap();
+        assert!(usable_thumb(&inside, &thumbs));
+        let outside = dir.path().join("x.jpg");
+        std::fs::write(&outside, b"jpg").unwrap();
+        assert!(!usable_thumb(&outside, &thumbs), "outside the thumbs folder");
+        assert!(!usable_thumb(&thumbs.join("..").join("x.jpg"), &thumbs), "`..` must not escape");
+        #[cfg(windows)]
+        assert!(usable_thumb(Path::new(&inside.to_string_lossy().to_uppercase()), &thumbs), "case-insensitive on Windows");
     }
 
     #[test]

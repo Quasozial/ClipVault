@@ -122,6 +122,18 @@ export async function startImport(): Promise<void> {
   }
 }
 
+// ----- library order (for previous/next clip in the clip view) -----
+
+let libraryOrder: string[] | null = null;
+
+/** The library's clip ids in their current filter and sort order; set by the library page. */
+export function setLibraryOrder(ids: string[]) {
+  libraryOrder = ids;
+}
+
+/** Null until the library page has shown its list once. */
+export const getLibraryOrder = () => libraryOrder;
+
 // ----- hash routing -----
 
 export type Route = { page: "library" } | { page: "clip"; id: string } | { page: "settings"; section?: string };

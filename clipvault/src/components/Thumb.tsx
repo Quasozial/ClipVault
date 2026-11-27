@@ -16,6 +16,18 @@ export function Thumb({ clip, root }: { clip: Clip; root: Element | null }) {
   const known = cache.has(clip.id) ? cache.get(clip.id)! : clip.thumbnail_path;
   const [path, setPath] = useState<string | null | undefined>(known ?? undefined);
   const [broken, setBroken] = useState(false);
+  // A stored path can point at a file that is gone (cache cleared, data moved):
+  // the first load error asks the backend once, which regenerates missing files.
+  const [retried, setRetried] = useState(false);
+  const onImgError = () => {
+    if (retried) {
+      setBroken(true);
+      return;
+    }
+    setRetried(true);
+    cache.delete(clip.id);
+    setPath(undefined);
+  };
 
   useEffect(() => {
     if (path !== undefined || cache.has(clip.id)) return;
@@ -55,7 +67,7 @@ export function Thumb({ clip, root }: { clip: Clip; root: Element | null }) {
   return (
     <div ref={ref} className={`thumb${showImg ? "" : " thumb-empty"}`}>
       {showImg ? (
-        <img src={fileSrc(path)} alt="" loading="lazy" decoding="async" draggable={false} onError={() => setBroken(true)} />
+        <img src={fileSrc(path)} alt="" loading="lazy" decoding="async" draggable={false} onError={onImgError} />
       ) : (
         <svg className="thumb-ph" viewBox="0 0 24 24" width="28" height="28" aria-hidden>
           <rect x="3" y="5" width="18" height="14" rx="2" fill="none" stroke="currentColor" strokeWidth="1.4" />

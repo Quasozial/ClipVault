@@ -13,7 +13,7 @@ import { buildLayout, columnsFor, headingAt, moveFocus, visibleRange } from "../
 import { applyView, EMPTY_FILTER, facetCounts, isFiltered, type LibraryFilter, type LibrarySort } from "../lib/libraryView";
 import { prune, runBulk, selectRange, toggle } from "../lib/selection";
 import { storageSummary } from "../lib/storage";
-import { navigate, startImport, useImport } from "../lib/stores";
+import { navigate, setLibraryOrder, startImport, useImport } from "../lib/stores";
 import { reportError, toast } from "../lib/toast";
 
 /**
@@ -234,6 +234,9 @@ export function Library() {
 
   const list = useMemo(() => (all ? applyView(all, filter, sort) : []), [all, filter, sort]);
   const facets = useMemo(() => facetCounts(all ?? [], filter), [all, filter]);
+  useEffect(() => {
+    if (all) setLibraryOrder(list.map((c) => c.id));
+  }, [all, list]);
   const dated = sort === "newest" || sort === "oldest";
 
   const innerW = Math.max(0, size.w - PAD * 2);
@@ -432,6 +435,35 @@ export function Library() {
   const selectedSize = useMemo(() => clipsOf([...selected]).reduce((n, c) => n + c.size, 0), [selected, byId]);
   const deleteSize = confirmDelete ? clipsOf(confirmDelete).reduce((n, c) => n + c.size, 0) : 0;
 
+  // Select (or, when all are selected already, deselect) every clip under one date heading.
+  const groupIds = (g: { firstIndex: number; count: number }) => visibleIds.slice(g.firstIndex, g.firstIndex + g.count);
+  const toggleGroup = (g: { firstIndex: number; count: number }) => {
+    const ids = groupIds(g);
+    setSelected((s) => {
+      const next = new Set(s);
+      if (ids.every((id) => s.has(id))) ids.forEach((id) => next.delete(id));
+      else ids.forEach((id) => next.add(id));
+      return next;
+    });
+    anchor.current = ids[ids.length - 1] ?? anchor.current;
+  };
+  const groupSelectButton = (g: { label: string; firstIndex: number; count: number }) => {
+    const full = groupIds(g).every((id) => selected.has(id));
+    return (
+      <button
+        type="button"
+        className={`group-select${full ? " on" : ""}`}
+        onClick={() => toggleGroup(g)}
+        title={full ? `Deselect ${g.label}` : `Select all of ${g.label}`}
+      >
+        {full ? "Deselect" : "Select all"}
+      </button>
+    );
+  };
+  const stickyRow = sticky
+    ? [...layout.rows].reverse().find((r): r is Extract<(typeof layout.rows)[number], { kind: "heading" }> => r.kind === "heading" && r.top <= scrollTop - PAD)
+    : undefined;
+
   const filtered = isFiltered(filter);
   const rows = [];
   for (let r = first; r <= last; r++) {
@@ -440,6 +472,7 @@ export function Library() {
       rows.push(
         <h2 key={`h${r}`} className="group-heading" style={{ top: PAD + row.top, left: PAD, right: PAD, height: row.height }}>
           {row.label} <span>{row.count}</span>
+          {groupSelectButton(row)}
         </h2>,
       );
     } else {
@@ -540,8 +573,13 @@ export function Library() {
         }}
       >
         {sticky && (
-          <div className="group-sticky" aria-hidden>
-            <div>{sticky}</div>
+          <div className="group-sticky">
+            <div>
+              <span className="group-sticky-label" aria-hidden>
+                {sticky}
+              </span>
+              {stickyRow && groupSelectButton(stickyRow)}
+            </div>
           </div>
         )}
         {list.length > 0 && (

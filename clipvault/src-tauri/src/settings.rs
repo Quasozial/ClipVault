@@ -84,6 +84,10 @@ impl Encoder {
         }
     }
 
+    pub fn is_hevc(self) -> bool {
+        matches!(self, Encoder::HevcNvenc | Encoder::HevcAmf | Encoder::HevcQsv)
+    }
+
     pub fn is_hardware(self) -> bool {
         !matches!(self, Encoder::Auto | Encoder::X264)
     }

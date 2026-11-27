@@ -374,6 +374,10 @@ export const api = {
   saveSettings: (settings: Settings) => call<HotkeyError[]>("save_settings", { settings }),
   listDisplays: () => call<DisplayInfo[]>("list_displays"),
   listEncoders: () => call<EncoderList>("list_encoders"),
+  /** Whether this page's `<video>` decodes HEVC; without it Auto records H.264. */
+  reportPlayback: (hevc: boolean) => call<null>("report_playback", { hevc }),
+  openHevcStorePage: () => call<null>("open_hevc_store_page"),
+  openLogsFolder: () => call<null>("open_logs_folder"),
   listAudioDevices: () => call<AudioDevice[]>("list_audio_devices"),
   /** Disk space of the drive holding `dir`, and the library's size. */
   storageInfo: (dir: string) => call<StorageInfo>("storage_info", { dir }),

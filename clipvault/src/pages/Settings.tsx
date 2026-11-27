@@ -903,6 +903,15 @@ export function Settings({ section }: { section?: string }) {
             <Toggle checked={draft.start_with_windows} onChange={(v) => set("start_with_windows", v)} label={draft.start_with_windows ? "On" : "Off"} />
           </Row>
           <UpdateRow />
+          <Row label="Log files" hint="Send these when reporting a problem.">
+            <button
+              type="button"
+              className="btn"
+              onClick={() => void api.openLogsFolder().catch((e) => reportError("Could not open the log folder", e))}
+            >
+              Open logs folder
+            </button>
+          </Row>
         </Section>
 
         <ImportSection onImported={fetchSettings} />

@@ -412,6 +412,9 @@ export function createMockBackend(): Backend {
       ],
       auto: { id: "Av1Nvenc", label: "NVIDIA AV1", hardware: true },
     }),
+    report_playback: () => null,
+    open_hevc_store_page: () => null,
+    open_logs_folder: () => null,
     compress_clip: ({ id }) => {
       if (compressing.has(id)) return null;
       compressing.set(id, "queued");

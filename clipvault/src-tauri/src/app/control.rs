@@ -79,6 +79,7 @@ pub(super) async fn control_loop(
         core.cfg.ffmpeg.is_some(),
         core.rl_connected.clone(),
         encoders,
+        core.hevc_playable(),
     );
     let mut watcher = GameWatcher::new();
     let mut tick = interval(WATCH_INTERVAL);
@@ -91,6 +92,11 @@ pub(super) async fn control_loop(
                 Some(Cmd::SettingsChanged) => {
                     let s = core.settings();
                     ctl.settings_changed(&s).await;
+                    false
+                }
+                Some(Cmd::HevcPlayable(ok)) => {
+                    let s = core.settings();
+                    ctl.set_hevc_playable(ok, &s).await;
                     false
                 }
                 Some(Cmd::OutputMissing) => {

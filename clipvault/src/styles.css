@@ -999,6 +999,37 @@ select.chip-more {
   font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
+.group-select {
+  margin-left: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, border-color 0.12s;
+}
+.group-heading:hover .group-select,
+.group-sticky:hover .group-select,
+.group-select:focus-visible,
+.group-select.on,
+.library:has(.card.selected) .group-select {
+  opacity: 1;
+}
+.group-select:hover,
+.group-select.on {
+  color: var(--text);
+  border-color: var(--muted);
+}
+.group-sticky-label {
+  color: inherit !important;
+  font-size: inherit !important;
+  font-weight: inherit !important;
+}
 .group-sticky {
   position: sticky;
   top: 0;
@@ -1088,6 +1119,11 @@ select.chip-more {
   align-items: center;
   gap: 12px;
   margin-bottom: 12px;
+}
+.clip-nav {
+  display: inline-flex;
+  gap: 2px;
+  flex: none;
 }
 .back {
   display: inline-flex;

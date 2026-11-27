@@ -7,8 +7,9 @@ import { Timeline, type TimelineTrack } from "../components/Timeline";
 import { ConfirmDialog } from "../components/ui";
 import { formatBytes, formatClock, formatDuration, formatTakenAt } from "../lib/format";
 import { addTags } from "../lib/tags";
-import { navigate } from "../lib/stores";
-import { EXPORT_PRESETS, exportOptions, exportTracks, formatSpeed, frameStep, markerJump, SPEEDS, stepSpeed } from "../lib/player";
+import { applyView, EMPTY_FILTER } from "../lib/libraryView";
+import { getLibraryOrder, navigate } from "../lib/stores";
+import { EXPORT_PRESETS, exportOptions, exportTracks, formatSpeed, frameStep, hasNoPicture, markerJump, SPEEDS, stepSpeed } from "../lib/player";
 import { reportError, toast } from "../lib/toast";
 
 type Meta = { title: string; description: string; tags: string[] };
@@ -109,6 +110,8 @@ export function ClipView({ id }: { id: string }) {
   const [mediaDuration, setMediaDuration] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
   const [videoError, setVideoError] = useState(false);
+  // Loaded, but with sound only: no decoder for the video (HEVC without the extension).
+  const [noPicture, setNoPicture] = useState(false);
   const [accurate, setAccurate] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [presetId, setPresetId] = useState(EXPORT_PRESETS[0].id);
@@ -118,6 +121,23 @@ export function ClipView({ id }: { id: string }) {
   const [rate, setRate] = useState(1);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  // Neighbours in the library's order (opened without visiting the library: newest first).
+  const [order, setOrder] = useState<string[] | null>(() => getLibraryOrder());
+  useEffect(() => {
+    if (order?.includes(id)) return;
+    let live = true;
+    api.listClips({}).then(
+      (all) => live && setOrder(applyView(all, EMPTY_FILTER, "newest").map((c) => c.id)),
+      () => {},
+    );
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+  const at = order ? order.indexOf(id) : -1;
+  const prevId = at > 0 ? order![at - 1] : null;
+  const nextId = at >= 0 && at < order!.length - 1 ? order![at + 1] : null;
   const videoRef = useRef<HTMLVideoElement>(null);
   const playerRef = useRef<HTMLDivElement>(null);
   // Every audio track plays from its own element (a <video> only plays the
@@ -186,6 +206,7 @@ export function ClipView({ id }: { id: string }) {
     setCompressStage(null);
     setVideoVersion(0);
     setVideoError(false);
+    setNoPicture(false);
     resume.current = null;
     loadedSize.current = null;
     // A fresh element loads the file again where the old one was.
@@ -193,6 +214,7 @@ export function ClipView({ id }: { id: string }) {
       const v = videoRef.current;
       if (v && !resume.current) resume.current = { t: v.currentTime, play: !v.paused };
       setVideoError(false);
+      setNoPicture(false);
       setVideoVersion((n) => n + 1);
     };
     const offClip = on("clip-updated", (c) => {
@@ -568,6 +590,14 @@ export function ClipView({ id }: { id: string }) {
           e.preventDefault();
           stepFrame(1);
           break;
+        case "PageUp":
+          e.preventDefault();
+          if (prevId) navigate({ page: "clip", id: prevId });
+          break;
+        case "PageDown":
+          e.preventDefault();
+          if (nextId) navigate({ page: "clip", id: nextId });
+          break;
         case "[":
           setRate((r) => stepSpeed(r, -1));
           break;
@@ -595,7 +625,7 @@ export function ClipView({ id }: { id: string }) {
     };
     window.addEventListener("keydown", k);
     return () => window.removeEventListener("keydown", k);
-  }, [confirmDelete, togglePlay, seek, stepFrame, jumpMarker, toggleFullscreen, changeTrim, clip, tin, tout]);
+  }, [confirmDelete, togglePlay, seek, stepFrame, jumpMarker, toggleFullscreen, changeTrim, clip, tin, tout, prevId, nextId]);
 
   if (!clip) {
     return (
@@ -657,6 +687,32 @@ export function ClipView({ id }: { id: string }) {
           >
             <StarIcon on={clip.starred} size={18} />
           </button>
+          <span className="clip-nav" role="group" aria-label="Clips">
+            <button
+              type="button"
+              className="btn btn-icon btn-ghost"
+              disabled={!prevId}
+              onClick={() => prevId && navigate({ page: "clip", id: prevId })}
+              title="Previous clip (Page Up)"
+              aria-label="Previous clip"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+                <path d="M10 3 5 8l5 5" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            <button
+              type="button"
+              className="btn btn-icon btn-ghost"
+              disabled={!nextId}
+              onClick={() => nextId && navigate({ page: "clip", id: nextId })}
+              title="Next clip (Page Down)"
+              aria-label="Next clip"
+            >
+              <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+                <path d="M6 3l5 5-5 5" stroke="currentColor" strokeWidth="1.8" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </span>
         </div>
         {titleError && (
           <p className="field-error" role="alert">
@@ -680,6 +736,7 @@ export function ClipView({ id }: { id: string }) {
             muted={separateAudio}
             onLoadedMetadata={(e) => {
               const v = e.currentTarget;
+              setNoPicture(hasNoPicture(v));
               if (Number.isFinite(v.duration)) setMediaDuration(v.duration);
               const back = resume.current;
               resume.current = null;
@@ -729,6 +786,28 @@ export function ClipView({ id }: { id: string }) {
             <div className="player-error">
               <p>This video file could not be played.</p>
               <p className="muted">{clip.path}</p>
+            </div>
+          )}
+          {noPicture && !videoError && compressStage !== "swapping" && (
+            <div className="player-error">
+              <p>This PC cannot show this clip's video – only its sound plays.</p>
+              <p className="muted">
+                Most likely it is HEVC, which needs Microsoft's HEVC Video Extensions. With the encoder on
+                Automatic, new clips record in H.264.
+              </p>
+              <p>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    api.openHevcStorePage().catch((err) => reportError("Could not open the Microsoft Store", err));
+                  }}
+                  onDoubleClick={(e) => e.stopPropagation()}
+                >
+                  Get HEVC Video Extensions
+                </button>
+              </p>
             </div>
           )}
           {fullscreen && (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Marker } from "../api";
-import { allTracksMixed, EXPORT_PRESETS, exportOptions, exportTracks, frameStep, markerJump, stepSpeed } from "./player";
+import { allTracksMixed, canDecodeHevc, EXPORT_PRESETS, exportOptions, exportTracks, frameStep, hasNoPicture, markerJump, stepSpeed } from "./player";
 
 describe("stepSpeed", () => {
   it("steps through the list and stops at the ends", () => {
@@ -69,5 +69,32 @@ describe("allTracksMixed", () => {
       { index: 2, volume: 1 },
     ]);
     expect(allTracksMixed([])).toEqual([]);
+  });
+});
+
+describe("canDecodeHevc", () => {
+  it("trusts MediaSource first, then canPlayType", () => {
+    expect(canDecodeHevc(() => true, () => "")).toBe(true);
+    expect(canDecodeHevc(() => false, () => "")).toBe(false);
+    expect(canDecodeHevc(undefined, () => "probably")).toBe(true);
+    expect(canDecodeHevc(undefined, () => "maybe")).toBe(true);
+    expect(canDecodeHevc(undefined, () => "")).toBe(false);
+  });
+
+  it("asks about the hvc1 tag in MP4", () => {
+    const asked: string[] = [];
+    canDecodeHevc((t) => (asked.push(t), false), undefined);
+    expect(asked[0]).toMatch(/^video\/mp4; codecs="hvc1\./);
+  });
+
+  it("assumes support when the page cannot tell", () => {
+    expect(canDecodeHevc(undefined, undefined)).toBe(true);
+  });
+});
+
+describe("hasNoPicture", () => {
+  it("is true when the video track was dropped (no decoder)", () => {
+    expect(hasNoPicture({ videoWidth: 0, videoHeight: 0 })).toBe(true);
+    expect(hasNoPicture({ videoWidth: 1920, videoHeight: 1080 })).toBe(false);
   });
 });

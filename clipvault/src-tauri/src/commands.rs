@@ -412,8 +412,31 @@ pub struct EncoderList {
 pub fn list_encoders(core: Core<'_>) -> EncoderList {
     let avail = core.available_encoders();
     let opt = |e: crate::settings::Encoder| EncoderOption { id: e, label: e.label(), hardware: e.is_hardware() };
-    let (auto, _) = crate::capture::encoders::resolve(crate::settings::Encoder::Auto, &avail);
+    let (auto, _) =
+        crate::capture::encoders::resolve_for_playback(crate::settings::Encoder::Auto, &avail, core.hevc_playable());
     EncoderList { available: avail.iter().filter(|e| e.can_record()).map(|&e| opt(e)).collect(), auto: opt(auto) }
+}
+
+/// The page reports at load whether its `<video>` can decode HEVC (WebView2
+/// needs Microsoft's HEVC Video Extensions); without it Auto records H.264.
+#[tauri::command]
+pub fn report_playback(core: Core<'_>, hevc: bool) {
+    core.report_playback(hevc);
+}
+
+/// Microsoft Store page of "HEVC Video Extensions" (fixed URL, nothing from the page).
+#[tauri::command]
+pub fn open_hevc_store_page() -> Result<(), String> {
+    tauri_plugin_opener::open_url("ms-windows-store://pdp/?ProductId=9NMZLZ57R3T7", None::<&str>)
+        .map_err(|e| format!("could not open the Microsoft Store: {e}"))
+}
+
+/// Opens ClipVault's own log folder in Explorer (fixed path, nothing from the page).
+#[tauri::command]
+pub fn open_logs_folder() -> Result<(), String> {
+    let dir = crate::app::app_data_dir().join("logs");
+    let _ = std::fs::create_dir_all(&dir);
+    tauri_plugin_opener::open_path(&dir, None::<&str>).map_err(|e| format!("could not open the log folder: {e}"))
 }
 
 /// Queues the clip for background AV1 compression; `clip-updated` follows.

@@ -26,7 +26,7 @@ export function visibleRows({ scrollTop, viewport, rowHeight, rowCount, overscan
 
 
 export type LayoutRow<T> =
-  | { kind: "heading"; label: string; count: number; top: number; height: number }
+  | { kind: "heading"; label: string; count: number; firstIndex: number; top: number; height: number }
   | { kind: "cards"; items: T[]; firstIndex: number; top: number; height: number };
 
 export interface Layout<T> {
@@ -50,7 +50,7 @@ export function buildLayout<T>(
   for (const g of runs) {
     if (g.items.length === 0) continue;
     if (o.headings) {
-      rows.push({ kind: "heading", label: g.label, count: g.items.length, top, height: o.headingH });
+      rows.push({ kind: "heading", label: g.label, count: g.items.length, firstIndex: index, top, height: o.headingH });
       top += o.headingH;
     }
     for (let i = 0; i < g.items.length; i += o.cols) {

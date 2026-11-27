@@ -1,4 +1,5 @@
-import { isMock } from "./api";
+import { api, isMock } from "./api";
+import { canDecodeHevc } from "./lib/player";
 import { useEffect } from "react";
 import { HealthStatus, Toasts } from "./components/ui";
 import { UpdateDialog } from "./components/UpdateDialog";
@@ -25,6 +26,13 @@ export default function App() {
   const health = useHealth();
   const section = route.page === "clip" ? "library" : route.page;
   useEffect(startUpdateChecks, []);
+  // Auto keeps recording off HEVC when this player could not show it.
+  useEffect(() => {
+    const ms = typeof MediaSource === "undefined" ? undefined : MediaSource;
+    const probe = document.createElement("video");
+    const hevc = canDecodeHevc(ms && ((t) => ms.isTypeSupported(t)), (t) => probe.canPlayType(t));
+    api.reportPlayback(hevc).catch(() => {});
+  }, []);
 
   return (
     <div className="app">

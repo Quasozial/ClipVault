@@ -103,6 +103,8 @@ pub(crate) enum Cmd {
     Retick,
     SettingsChanged,
     OutputMissing,
+    /// The player reported whether it can decode HEVC (see `report_playback`).
+    HevcPlayable(bool),
     Shutdown(oneshot::Sender<()>),
 }
 
@@ -132,6 +134,9 @@ pub struct AppCore {
     /// Video encoders this PC can run, best first; set once by the control
     /// loop before the first capture (see `capture::encoders`).
     encoders: OnceLock<Vec<Encoder>>,
+    /// Whether the app's player (WebView2) can decode HEVC, as reported by the
+    /// page at load. Assumed until then; `false` keeps Auto off HEVC.
+    hevc_playable: AtomicBool,
     /// Background AV1 re-encoding of saved clips.
     compressor: Arc<crate::compress::Compressor>,
     /// Set when the library was restored, recreated or is empty at open: the
@@ -223,6 +228,7 @@ impl AppCore {
             level_rx: Mutex::new(Some(level_rx)),
             rt: OnceLock::new(),
             encoders: OnceLock::new(),
+            hevc_playable: AtomicBool::new(true),
             compressor,
             rescan_after_restore: Mutex::new(rescan_after_restore),
             _kicker: kicker,
@@ -247,6 +253,16 @@ impl AppCore {
         rt.spawn(control::levels_loop(self.clone(), level_rx));
         rt.spawn(backup_loop(self.db.clone(), self.cfg.data_dir.join("backups")));
         rt.spawn(disk_loop(self.clone()));
+        {
+            // Stale thumbnail paths (moved data folder, deleted files) would
+            // show placeholders forever; clear or repoint them once per start.
+            let (db, thumbs) = (self.db.clone(), self.thumbs_dir());
+            rt.spawn_blocking(move || match crate::library::repair_thumbnails(&locks::lock(&db), &thumbs) {
+                Ok(0) => {}
+                Ok(n) => tracing::info!("[thumbs] repaired {n} stale thumbnail path(s)"),
+                Err(e) => tracing::warn!("[thumbs] repair failed: {e:#}"),
+            });
+        }
         if let Some(since) = locks::lock(&self.rescan_after_restore).take() {
             self.spawn_rescan(since);
         }
@@ -545,6 +561,19 @@ impl AppCore {
     /// FFmpeg cannot run).
     pub fn available_encoders(&self) -> Vec<Encoder> {
         self.encoders.get().cloned().unwrap_or_default()
+    }
+
+    pub fn hevc_playable(&self) -> bool {
+        self.hevc_playable.load(Ordering::Relaxed)
+    }
+
+    /// From the page: whether its `<video>` can decode HEVC. A change restarts
+    /// a running capture whose automatic encoder pick depends on it.
+    pub fn report_playback(&self, hevc: bool) {
+        if self.hevc_playable.swap(hevc, Ordering::Relaxed) != hevc {
+            tracing::info!("player HEVC decoding: {}", if hevc { "available" } else { "missing (no HEVC Video Extensions)" });
+            let _ = self.cmd_tx.send(Cmd::HevcPlayable(hevc));
+        }
     }
 
     /// Probes the encoders once (blocking thread); later calls return the result.

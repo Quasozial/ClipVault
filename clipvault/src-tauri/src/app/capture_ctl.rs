@@ -83,6 +83,8 @@ pub struct CaptureController {
     encoders: Vec<Encoder>,
     /// Encoder notices already shown (once per process each).
     notices_shown: Vec<String>,
+    /// The app's player can decode HEVC (else Auto avoids it).
+    hevc_playable: bool,
 }
 
 impl CaptureController {
@@ -96,6 +98,7 @@ impl CaptureController {
         ffmpeg_found: bool,
         rl_connected: Arc<AtomicBool>,
         encoders: Vec<Encoder>,
+        hevc_playable: bool,
     ) -> Self {
         Self {
             supervisor,
@@ -113,13 +116,26 @@ impl CaptureController {
             force_primary: false,
             encoders,
             notices_shown: Vec::new(),
+            hevc_playable,
+        }
+    }
+
+    /// The player's HEVC support changed: restart a running capture whose
+    /// encoder pick changes with it.
+    pub async fn set_hevc_playable(&mut self, ok: bool, s: &Settings) {
+        let pick = |c: &Self| crate::capture::encoders::resolve_for_playback(s.encoder, &c.encoders, c.hevc_playable).0;
+        let before = pick(self);
+        self.hevc_playable = ok;
+        if pick(self) != before && self.target != CaptureTarget::None {
+            tracing::info!("player HEVC support changed: restarting capture with {:?}", pick(self));
+            self.start(s).await;
         }
     }
 
     /// The encoder recording uses for `wanted`, toasting (once each) when it is
     /// not the one picked or when it is the CPU.
     fn pick_encoder(&mut self, wanted: Encoder) -> Encoder {
-        let (enc, notice) = crate::capture::encoders::resolve(wanted, &self.encoders);
+        let (enc, notice) = crate::capture::encoders::resolve_for_playback(wanted, &self.encoders, self.hevc_playable);
         let cpu = (enc == Encoder::X264 && wanted != Encoder::X264 && !self.encoders.is_empty())
             .then(|| crate::capture::encoders::CPU_NOTICE.to_string());
         for n in [notice, cpu].into_iter().flatten() {
