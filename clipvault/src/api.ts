@@ -139,6 +139,7 @@ export interface Settings {
   bitrate_kbps: number;
   output_height: number;
   monitor_id: string | null;
+  game_capture: "Window" | "Monitor";
   desktop_capture: boolean;
   buffer_dir: string;
   capture_dir: string;

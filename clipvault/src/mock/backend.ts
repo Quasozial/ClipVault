@@ -163,6 +163,7 @@ export function createMockBackend(): Backend {
     bitrate_kbps: 40000,
     output_height: 1080,
     monitor_id: null,
+    game_capture: "Window",
     desktop_capture: false,
     buffer_dir: "C:\\Users\\player\\AppData\\Local\\ClipVault\\buffer",
     capture_dir: "E:\\GameClips",

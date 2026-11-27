@@ -789,7 +789,7 @@ export function Settings({ section }: { section?: string }) {
               <span>Mbit/s</span>
             </div>
           </Row>
-          <Row label="Monitor" htmlFor="mon" hint="Desktop recording only. Games record the monitor they run on.">
+          <Row label="Monitor" htmlFor="mon" hint="Desktop recording, and games when Game capture is Whole monitor.">
             <div className="inline">
               <select id="mon" value={draft.monitor_id ?? ""} onChange={(e) => set("monitor_id", e.target.value || null)}>
                 <option value="">Primary display</option>
@@ -805,6 +805,16 @@ export function Settings({ section }: { section?: string }) {
                 </span>
               )}
             </div>
+          </Row>
+          <Row
+            label="Game capture"
+            htmlFor="gcap"
+            hint="Game window records only the game: no desktop, no pop-ups, black while it is minimized. Whole monitor records everything on the game's screen."
+          >
+            <select id="gcap" value={draft.game_capture} onChange={(e) => set("game_capture", e.target.value as "Window" | "Monitor")}>
+              <option value="Window">Game window (like OBS)</option>
+              <option value="Monitor">Whole monitor</option>
+            </select>
           </Row>
           <Row label="Desktop capture" hint="Record the desktop when no game is running. Also on the hotkey and the tray menu.">
             <Toggle checked={draft.desktop_capture} onChange={(v) => set("desktop_capture", v)} label={draft.desktop_capture ? "On" : "Off"} />

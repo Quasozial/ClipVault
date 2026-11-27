@@ -167,6 +167,19 @@ Get-FileHash C:\ProgramData\SteelSeries\GG\apps\moments\db\database.db -Algorith
 2. Unplug/disable that monitor (or set `monitor_id` to a bogus value in `%LOCALAPPDATA%\ClipVault\settings.json` with ClipVault quit).
 3. Pass: ClipVault falls back to the primary monitor (log says so), recording continues, no crash loop.
 
+## 10. Game window capture
+
+Settings -> Game capture = **Game window (like OBS)** (default).
+
+- [ ] Launch Rocket League: the buffer is black until the game window exists, and never shows the launcher or the desktop.
+- [ ] Alt-tab away in borderless mode: the game keeps showing in the clip. In fullscreen mode: the clip goes black.
+- [ ] A Discord/notification pop-up over the game is absent from the saved clip.
+- [ ] Quit the game: the clip is black during the 10 s grace period.
+- [ ] Windowed mode: no title bar in the clip; black bars when the window is not 16:9.
+- [ ] No yellow capture border appears on screen.
+- [ ] Brightness on the HDR monitor equals a "Whole monitor" clip of the same scene.
+- [ ] Switching the setting to **Whole monitor** restores the previous behaviour (monitor capture).
+
 ## Recording results
 
 Write date, build (`ClipVault_0.1.0`), PASS/FAIL per section and any logs (`%LOCALAPPDATA%\ClipVault\logs`) into your notes. If a
