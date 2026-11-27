@@ -2342,6 +2342,79 @@ select.chip-more {
   object-fit: contain;
   background: #000;
 }
+.player:fullscreen {
+  border-radius: 0;
+}
+.player.controls-idle {
+  cursor: none;
+}
+
+/* transport over the video while fullscreen */
+.fs-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 32px 20px 12px;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.75));
+  color: #fff;
+  cursor: default;
+  transition: opacity 0.2s;
+}
+.controls-idle .fs-bar {
+  opacity: 0;
+  pointer-events: none;
+}
+.fs-seek {
+  padding: 8px 0;
+  cursor: pointer;
+  touch-action: none;
+}
+.fs-seek-track {
+  position: relative;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
+  transition: height 0.1s;
+}
+.fs-seek:hover .fs-seek-track {
+  height: 6px;
+}
+.fs-seek-trim {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent-soft);
+  outline: 1px solid var(--accent);
+}
+.fs-seek-done {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--accent);
+  border-radius: 2px;
+}
+.fs-seek-head {
+  position: absolute;
+  top: 50%;
+  width: 12px;
+  height: 12px;
+  margin: -6px 0 0 -6px;
+  border-radius: 50%;
+  background: #fff;
+}
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.fs-row .btn {
+  color: #fff;
+}
+.fs-exit {
+  margin-left: auto;
+}
 
 .export-failed {
   max-height: 160px;

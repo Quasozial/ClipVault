@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, fileSrc, on, type AudioTrack, type Clip, type CompressStage } from "../api";
 import { StarIcon } from "../components/StarIcon";
+import { FullscreenBar } from "../components/FullscreenBar";
 import { forgetThumb } from "../components/Thumb";
 import { Timeline, type TimelineTrack } from "../components/Timeline";
 import { ConfirmDialog } from "../components/ui";
@@ -385,6 +386,33 @@ export function ClipView({ id }: { id: string }) {
     }
   };
 
+  const [fullscreen, setFullscreen] = useState(false);
+  // When fullscreen last changed: the browser may exit fullscreen on Esc and
+  // still pass that same Esc to the page, which must not also leave the clip.
+  const fullscreenChangedAt = useRef(0);
+  useEffect(() => {
+    const sync = () => {
+      fullscreenChangedAt.current = performance.now();
+      setFullscreen(document.fullscreenElement !== null);
+    };
+    document.addEventListener("fullscreenchange", sync);
+    return () => document.removeEventListener("fullscreenchange", sync);
+  }, []);
+
+  // Fullscreen controls hide after a moment without mouse movement while playing.
+  const [controlsIdle, setControlsIdle] = useState(false);
+  const idleTimer = useRef<number | undefined>(undefined);
+  const wakeControls = useCallback(() => {
+    setControlsIdle(false);
+    window.clearTimeout(idleTimer.current);
+    idleTimer.current = window.setTimeout(() => setControlsIdle(true), 2500);
+  }, []);
+  useEffect(() => {
+    if (fullscreen) wakeControls();
+    else setControlsIdle(false);
+    return () => window.clearTimeout(idleTimer.current);
+  }, [fullscreen, wakeControls]);
+
   const toggleFullscreen = useCallback(() => {
     if (document.fullscreenElement) void document.exitFullscreen();
     else void playerRef.current?.requestFullscreen().catch(() => {});
@@ -399,6 +427,23 @@ export function ClipView({ id }: { id: string }) {
       v.play().catch((e) => reportError("Could not play the clip", e));
     } else v.pause();
   }, []);
+
+  // A click on the video waits briefly, so a double-click only toggles
+  // fullscreen instead of also playing and pausing.
+  const clickTimer = useRef<number | undefined>(undefined);
+  useEffect(() => () => window.clearTimeout(clickTimer.current), []);
+  const onPlayerClick = useCallback(
+    (e: React.MouseEvent) => {
+      window.clearTimeout(clickTimer.current);
+      if (e.detail > 1) return;
+      clickTimer.current = window.setTimeout(togglePlay, 220);
+    },
+    [togglePlay],
+  );
+  const onPlayerDoubleClick = useCallback(() => {
+    window.clearTimeout(clickTimer.current);
+    toggleFullscreen();
+  }, [toggleFullscreen]);
 
   const clipId = clip?.id;
   const saveMeta = useCallback(
@@ -542,7 +587,9 @@ export function ClipView({ id }: { id: string }) {
           if (v && v.currentTime > tin + 0.5) void changeTrim(clip?.trim_in ?? null, v.currentTime);
           break;
         case "Escape":
-          navigate({ page: "library" });
+          // Esc leaves fullscreen first; only a second press goes back.
+          if (document.fullscreenElement) void document.exitFullscreen();
+          else if (performance.now() - fullscreenChangedAt.current > 300) navigate({ page: "library" });
           break;
       }
     };
@@ -617,7 +664,13 @@ export function ClipView({ id }: { id: string }) {
           </p>
         )}
 
-        <div className="player" ref={playerRef} onClick={togglePlay} onDoubleClick={toggleFullscreen}>
+        <div
+          className={`player${fullscreen && controlsIdle && playing ? " controls-idle" : ""}`}
+          ref={playerRef}
+          onClick={onPlayerClick}
+          onDoubleClick={onPlayerDoubleClick}
+          onPointerMove={fullscreen ? wakeControls : undefined}
+        >
           <video
             key={videoVersion}
             ref={videoRef}
@@ -677,6 +730,20 @@ export function ClipView({ id }: { id: string }) {
               <p>This video file could not be played.</p>
               <p className="muted">{clip.path}</p>
             </div>
+          )}
+          {fullscreen && (
+            <FullscreenBar
+              playing={playing}
+              current={current}
+              duration={duration}
+              tin={tin}
+              tout={tout}
+              hasTrim={hasTrim}
+              rate={rate}
+              onTogglePlay={togglePlay}
+              onSeek={seek}
+              onExit={toggleFullscreen}
+            />
           )}
         </div>
 
@@ -745,6 +812,24 @@ export function ClipView({ id }: { id: string }) {
               Clear trim
             </button>
           </span>
+          <button
+            type="button"
+            className="btn btn-icon btn-small btn-ghost"
+            onClick={toggleFullscreen}
+            title={fullscreen ? "Exit fullscreen (F)" : "Fullscreen (F)"}
+            aria-label={fullscreen ? "Exit fullscreen" : "Fullscreen"}
+            aria-pressed={fullscreen}
+          >
+            {fullscreen ? (
+              <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
+                <path d="M6 2v4H2M10 2v4h4M6 14v-4H2M10 14v-4h4" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            ) : (
+              <svg width="14" height="14" viewBox="0 0 16 16" aria-hidden>
+                <path d="M2 6V2h4M14 6V2h-4M2 10v4h4M14 10v4h-4" stroke="currentColor" strokeWidth="1.6" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </button>
         </div>
 
         <Timeline
