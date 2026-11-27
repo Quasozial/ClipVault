@@ -92,7 +92,11 @@ if ($DryRun) {
 git tag $tag
 git push origin $tag
 if ($LASTEXITCODE -ne 0) { throw "Pushing tag $tag failed" }
-$notesArg = if ($Notes) { $Notes } else { "ClipVault $version" }
-gh release create $tag $setup $sigFile $latest --repo $Repo --title "ClipVault $version" --notes $notesArg --verify-tag
+# Notes go through a file: Windows PowerShell 5.1 splits arguments with
+# embedded double quotes when calling native commands.
+$notesText = if ($Notes) { $Notes } else { "ClipVault $version" }
+$notesPath = Join-Path $nsis "release-notes.md"
+[IO.File]::WriteAllText($notesPath, $notesText, (New-Object Text.UTF8Encoding $false))
+gh release create $tag $setup $sigFile $latest --repo $Repo --title "ClipVault $version" --notes-file $notesPath --verify-tag
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
 Write-Host "Published $tag. Installed copies will offer the update on their next check."
