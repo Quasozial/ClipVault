@@ -77,6 +77,10 @@ pub fn app_data_dir() -> PathBuf {
     std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("ClipVault")
 }
 
+fn library_is_empty(conn: &rusqlite::Connection) -> bool {
+    conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get::<_, i64>(0)).unwrap_or(0) == 0
+}
+
 /// Mic-only capture for the Settings level meter while idle.
 struct MicProbe {
     device: Option<String>,
@@ -130,8 +134,8 @@ pub struct AppCore {
     encoders: OnceLock<Vec<Encoder>>,
     /// Background AV1 re-encoding of saved clips.
     compressor: Arc<crate::compress::Compressor>,
-    /// Set when the library was restored or recreated at open: the capture
-    /// folder is rescanned on start for clips the library lost (see `rescan`).
+    /// Set when the library was restored, recreated or is empty at open: the
+    /// capture folder is rescanned on start for clips the library lacks (see `rescan`).
     /// Inner value: time of the restored backup (`None`: no usable backup).
     rescan_after_restore: Mutex<Option<Option<SystemTime>>>,
     _kicker: Option<Arc<DesktopKicker>>,
@@ -151,10 +155,14 @@ impl AppCore {
         let (conn, notice) =
             db::open_library(&db_path, &backups).with_context(|| format!("opening library {}", db_path.display()))?;
         // Before today's backup is written: the restored backup's own time.
-        let rescan_after_restore = notice.as_ref().map(|_| {
-            let empty = conn.query_row("SELECT COUNT(*) FROM clips", [], |r| r.get::<_, i64>(0)).unwrap_or(0) == 0;
-            if empty { None } else { db::newest_backup_time(&backups) }
-        });
+        // An empty library (fresh install, deleted app data) takes every
+        // ClipVault clip already in the capture folder.
+        let empty = library_is_empty(&conn);
+        let rescan_after_restore = match (&notice, empty) {
+            (_, true) => Some(None),
+            (Some(_), false) => Some(db::newest_backup_time(&backups)),
+            (None, false) => None,
+        };
         if let Some(n) = notice {
             ui.toast(APP_TITLE, &n);
         }
@@ -244,20 +252,28 @@ impl AppCore {
         }
     }
 
-    /// Re-adds clips in the capture folder the restored library lost.
-    fn spawn_rescan(self: &Arc<Self>, since: Option<SystemTime>) {
+    /// Adds clips in the capture folder the library lacks: those saved after
+    /// a restored backup (`since`), or all of them into an empty library.
+    fn spawn_rescan(&self, since: Option<SystemTime>) {
         let Some(ffmpeg) = self.cfg.ffmpeg.clone() else { return };
-        let me = self.clone();
         let dir = self.settings().capture_dir.clone();
+        let (db, ui) = (self.db.clone(), self.ui.clone());
         self.spawn(async move {
-            let db = me.db.clone();
-            let found = tokio::task::spawn_blocking(move || crate::rescan::rescan(&db, &ffmpeg, &dir, since, since.is_some()))
-                .await;
+            let live = ui.clone();
+            let found = tokio::task::spawn_blocking(move || {
+                crate::rescan::rescan(&db, &ffmpeg, &dir, since, since.is_some(), &|c| live.clip_saved(c))
+            })
+            .await;
             match found {
-                Ok(Ok(0)) => tracing::info!("[rescan] no clips missing from the restored library"),
+                Ok(Ok(0)) => tracing::info!("[rescan] no clips missing from the library"),
                 Ok(Ok(n)) => {
-                    tracing::info!("[rescan] {n} clip(s) re-added");
-                    me.ui.toast(APP_TITLE, &format!("{n} clip(s) saved after the backup were found and added back to the library."));
+                    tracing::info!("[rescan] {n} clip(s) added");
+                    let msg = if since.is_some() {
+                        format!("{n} clip(s) saved after the backup were found and added back to the library.")
+                    } else {
+                        format!("{n} clip(s) found in the clip folder and added to the library.")
+                    };
+                    ui.toast(APP_TITLE, &msg);
                 }
                 Ok(Err(e)) => tracing::error!("[rescan] failed: {e:#}"),
                 Err(e) => tracing::error!("[rescan] task failed: {e}"),
@@ -424,6 +440,11 @@ impl AppCore {
         }
         if new.compress_clips && !old.compress_clips {
             self.compressor.enqueue_pending();
+        }
+        // Pointing an empty library at a folder of clips lists them. (A
+        // non-empty library moves its clips there instead: see `relocate`.)
+        if old.capture_dir != new.capture_dir && library_is_empty(&locks::lock(&self.db)) && self.rt.get().is_some() {
+            self.spawn_rescan(None);
         }
         self.refresh_mic_probe(); // the mic device may have changed
         self.ui.settings_changed();

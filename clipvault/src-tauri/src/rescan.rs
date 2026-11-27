@@ -1,8 +1,10 @@
-//! Capture-folder rescan after a library restore.
+//! Capture-folder rescan after a library restore, or into an empty library.
 //!
 //! When `library.db` is damaged it is replaced by the newest daily backup (see
 //! `db::open_library`). Clips saved after that backup are still on disk but
-//! have no row. This finds them, directly in the capture folder, by
+//! have no row. Likewise a fresh library (reinstall, deleted app data) knows
+//! none of the clips already in the capture folder. This finds them, directly
+//! in the capture folder, by
 //! ClipVault's file naming (`<Game>__YYYY-MM-DD__HH-MM-SS[_N].mp4`, see
 //! `save::clip_filename`), probes them with FFmpeg and adds them back.
 //!
@@ -66,8 +68,16 @@ pub fn parse_video_stream(stderr: &str) -> (u32, u32, u32, bool) {
 }
 
 /// Adds clip files in `dir` that the library does not know (see module docs).
-/// Returns how many were added. Blocking.
-pub fn rescan(db: &Mutex<Connection>, ffmpeg: &Path, dir: &Path, since: Option<SystemTime>, may_compress: bool) -> Result<usize> {
+/// `on_added` gets each clip as it is added (the UI lists it live). Returns
+/// how many were added. Blocking.
+pub fn rescan(
+    db: &Mutex<Connection>,
+    ffmpeg: &Path,
+    dir: &Path,
+    since: Option<SystemTime>,
+    may_compress: bool,
+    on_added: &dyn Fn(&Clip),
+) -> Result<usize> {
     let known: HashSet<String> = clips::list(&locks::lock(db), ClipFilter::default())?
         .into_iter()
         .map(|c| c.path.to_string_lossy().to_lowercase())
@@ -129,7 +139,11 @@ pub fn rescan(db: &Mutex<Connection>, ffmpeg: &Path, dir: &Path, since: Option<S
         if av1 || !may_compress {
             clips::set_compressed(&conn, &clip.id, clip.size, None)?;
         }
+        let added_clip = clips::get(&conn, &clip.id)?;
         drop(conn);
+        if let Some(c) = added_clip {
+            on_added(&c);
+        }
         tracing::info!("[rescan] re-added {}", path.display());
         added += 1;
     }
@@ -179,9 +193,10 @@ mod tests {
         let since = SystemTime::now() + Duration::from_secs(3600);
         std::fs::write(dir.path().join("G__2026-11-18__21-37-14.mp4"), b"x").unwrap();
         // Everything is older than `since`, so nothing is probed or added.
-        assert_eq!(rescan(&db, Path::new("no-ffmpeg.exe"), dir.path(), Some(since), true).unwrap(), 0);
+        let none = |_: &Clip| panic!("nothing should be added");
+        assert_eq!(rescan(&db, Path::new("no-ffmpeg.exe"), dir.path(), Some(since), true, &none).unwrap(), 0);
         // Without `since` the match is probed; a missing FFmpeg skips it.
-        assert_eq!(rescan(&db, Path::new("no-ffmpeg.exe"), dir.path(), None, false).unwrap(), 0);
-        assert_eq!(rescan(&db, Path::new("x"), &dir.path().join("missing"), None, false).unwrap(), 0);
+        assert_eq!(rescan(&db, Path::new("no-ffmpeg.exe"), dir.path(), None, false, &none).unwrap(), 0);
+        assert_eq!(rescan(&db, Path::new("x"), &dir.path().join("missing"), None, false, &none).unwrap(), 0);
     }
 }
