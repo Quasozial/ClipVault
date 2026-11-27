@@ -78,8 +78,13 @@ float3 pixel(uint2 o)
         return float3(0, 0, 0);
     float2 center = src_origin + (float2(o - dst_origin) + 0.5) * scale;
     float2 d = scale * 0.25;
-    float3 c = tap(center + float2(-d.x, -d.y)) + tap(center + float2(d.x, -d.y))
-             + tap(center + float2(-d.x, d.y)) + tap(center + float2(d.x, d.y));
+    // Taps stay half a texel inside the source rectangle, so bilinear
+    // filtering never blends in pixels around it (window border, title bar).
+    // For the whole frame this equals the sampler's edge clamp.
+    float2 lo = src_origin + 0.5;
+    float2 hi = max(lo, src_origin + scale * float2(dst_size) - 0.5);
+    float3 c = tap(clamp(center + float2(-d.x, -d.y), lo, hi)) + tap(clamp(center + float2(d.x, -d.y), lo, hi))
+             + tap(clamp(center + float2(-d.x, d.y), lo, hi)) + tap(clamp(center + float2(d.x, d.y), lo, hi));
     return to_srgb(saturate(c * 0.25));
 }
 

@@ -346,7 +346,7 @@ fn audio_setup_needed(current: Option<&[(SourceKind, &'static str)]>, plan: &[(S
 /// arrives as linear sRGB with white at exactly 1.0. On an HDR desktop it is
 /// Windows' "SDR content brightness" (`level` in thousandths; unknown: the
 /// default 200 nits).
-fn sdr_white(hdr: bool, level: u32) -> f32 {
+pub(crate) fn sdr_white(hdr: bool, level: u32) -> f32 {
     if !hdr {
         return 1.0;
     }

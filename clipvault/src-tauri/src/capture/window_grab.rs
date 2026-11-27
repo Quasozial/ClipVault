@@ -83,9 +83,381 @@ pub fn decide(s: &PictureState) -> WindowPicture {
     }
 }
 
+/// `r` shrunk to lie inside a `w` x `h` frame (at least 1x1 when the frame
+/// is not empty), so the shader never samples outside the copied frame.
+pub fn fit(r: Rect, w: u32, h: u32) -> Rect {
+    let x = r.x.min(w.saturating_sub(1));
+    let y = r.y.min(h.saturating_sub(1));
+    Rect { x, y, w: r.w.min(w - x.min(w)).max(1), h: r.h.min(h - y.min(h)).max(1) }
+}
+
+#[cfg(windows)]
+pub(crate) use source::WindowSource;
+
+/// The Windows.Graphics.Capture frame source. Lives on the grabber thread
+/// (RoInitialize'd multithreaded) and is polled once per tick; it never blocks:
+/// the frame pool is free-threaded and drained with `TryGetNextFrame`.
+#[cfg(windows)]
+mod source {
+    use super::*;
+    use crate::capture::display::game_window;
+    use crate::capture::hdr_grab::Notice;
+    use anyhow::{Context, Result};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::time::{Duration, Instant};
+    use windows::core::{Interface, HSTRING};
+    use windows::Foundation::Metadata::ApiInformation;
+    use windows::Foundation::TypedEventHandler;
+    use windows::Graphics::Capture::{
+        Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureAccess, GraphicsCaptureAccessKind,
+        GraphicsCaptureItem, GraphicsCaptureSession,
+    };
+    use windows::Graphics::DirectX::Direct3D11::IDirect3DDevice;
+    use windows::Graphics::DirectX::DirectXPixelFormat;
+    use windows::Graphics::SizeInt32;
+    use windows::Security::Authorization::AppCapabilityAccess::AppCapabilityAccessStatus;
+    use windows::Win32::Foundation::{HWND, POINT, RECT};
+    use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS};
+    use windows::Win32::Graphics::Dxgi::IDXGIDevice;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+    use windows::Win32::System::WinRT::Direct3D11::{
+        CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
+    };
+    use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+    use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic, IsWindow};
+
+    /// Window search while there is no session.
+    const SEARCH: Duration = Duration::from_millis(500);
+    /// Re-check for a bigger/other game window while capturing.
+    const RECHECK: Duration = Duration::from_secs(2);
+    /// Retry after a failed `CreateForWindow`/`StartCapture`.
+    const RETRY: Duration = Duration::from_secs(2);
+    /// No frame at the new size this long after a pool recreate: restart.
+    const RESIZE_WAIT: Duration = Duration::from_millis(250);
+    /// Found but not captured this long: tell the user once.
+    const TOAST_AFTER: Duration = Duration::from_secs(10);
+    const FORMAT: DirectXPixelFormat = DirectXPixelFormat::R16G16B16A16Float;
+    pub const CANT_CAPTURE: &str = "Can't capture the game window – switch Game capture to Whole monitor in Settings";
+
+    struct Session {
+        hwnd: HWND,
+        item: GraphicsCaptureItem,
+        pool: Direct3D11CaptureFramePool,
+        session: GraphicsCaptureSession,
+        size: SizeInt32,
+        /// Set by the item's `Closed` handler (window gone).
+        closed: Arc<AtomicBool>,
+        closed_token: i64,
+        /// The frame last handed out; kept until the next one so the pool
+        /// does not reuse its buffer while our copy may still be pending.
+        held: Option<Direct3D11CaptureFrame>,
+        /// When the pool was last recreated for a new size, until a frame at
+        /// that size arrives.
+        recreated: Option<Instant>,
+    }
+
+    impl Drop for Session {
+        fn drop(&mut self) {
+            if let Some(f) = self.held.take() {
+                let _ = f.Close();
+            }
+            let _ = self.item.RemoveClosed(self.closed_token);
+            let _ = self.session.Close();
+            let _ = self.pool.Close();
+        }
+    }
+
+    pub(crate) struct WindowSource {
+        device: IDirect3DDevice,
+        exes: Vec<String>,
+        notice: Notice,
+        session: Option<Session>,
+        /// Last search result while there is no session.
+        found: Option<(HWND, bool)>,
+        next_search: Instant,
+        next_recheck: Instant,
+        /// The window was found but capture failed since then.
+        failing_since: Option<Instant>,
+        toasted: bool,
+        last_error: Option<String>,
+        /// `IsBorderRequired` exists (Windows 11 / 10 2104+).
+        border_api: bool,
+        /// Borderless access granted (`None`: not asked yet).
+        borderless: Option<bool>,
+        have_last: bool,
+        /// (found, minimized, capturing) last logged.
+        logged: Option<(bool, bool, bool)>,
+    }
+
+    impl WindowSource {
+        pub fn new(device: &ID3D11Device, exes: Vec<String>, notice: Notice) -> Result<WindowSource> {
+            let dxgi: IDXGIDevice = device.cast().context("IDXGIDevice")?;
+            let device: IDirect3DDevice = unsafe { CreateDirect3D11DeviceFromDXGIDevice(&dxgi) }
+                .context("CreateDirect3D11DeviceFromDXGIDevice")?
+                .cast()?;
+            let border_api = ApiInformation::IsPropertyPresent(
+                &HSTRING::from("Windows.Graphics.Capture.GraphicsCaptureSession"),
+                &HSTRING::from("IsBorderRequired"),
+            )
+            .unwrap_or(false);
+            let now = Instant::now();
+            Ok(WindowSource {
+                device,
+                exes,
+                notice,
+                session: None,
+                found: None,
+                next_search: now,
+                next_recheck: now,
+                failing_since: None,
+                toasted: false,
+                last_error: None,
+                border_api,
+                borderless: None,
+                have_last: false,
+                logged: None,
+            })
+        }
+
+        /// This tick's picture, with the newest frame and its client crop
+        /// (inside the frame) when the picture is `New`.
+        pub fn poll(&mut self, now: Instant) -> (WindowPicture, Option<(ID3D11Texture2D, Rect)>) {
+            self.track(now);
+            let (found, minimized) = match &self.session {
+                Some(s) => (true, unsafe { IsIconic(s.hwnd) }.as_bool()),
+                None => self.found.map_or((false, false), |(_, m)| (true, m)),
+            };
+            let capturing = self.session.is_some();
+            let frame = match self.newest_frame() {
+                Ok(f) => f,
+                Err(e) => {
+                    self.warn(&e.context("capture frame"));
+                    None
+                }
+            };
+            let pic = decide(&PictureState { found, minimized, capturing, new_frame: frame.is_some(), have_last: self.have_last });
+            self.log_state(found, minimized, capturing);
+            match pic {
+                WindowPicture::Black => {
+                    self.have_last = false;
+                    (pic, None)
+                }
+                WindowPicture::Same => (pic, None),
+                WindowPicture::New => {
+                    let (f, tex, crop) = frame.expect("New has a frame");
+                    if let Some(old) = self.session.as_mut().and_then(|s| s.held.replace(f)) {
+                        let _ = old.Close();
+                    }
+                    self.have_last = true;
+                    (pic, Some((tex, crop)))
+                }
+            }
+        }
+
+        /// Finds, starts, re-checks and drops the capture session.
+        fn track(&mut self, now: Instant) {
+            if let Some(s) = &self.session {
+                if !unsafe { IsWindow(Some(s.hwnd)) }.as_bool() || s.closed.load(Ordering::SeqCst) {
+                    tracing::info!("window capture: window {:?} closed", s.hwnd.0);
+                    self.drop_session(now);
+                } else if s.recreated.is_some_and(|t| now.duration_since(t) >= RESIZE_WAIT) {
+                    // A static window sends no frame after the pool was
+                    // recreated at its new size; a new session always does.
+                    tracing::debug!("window capture: no frame after resize, restarting the session");
+                    self.drop_session(now);
+                } else if now >= self.next_recheck {
+                    self.next_recheck = now + RECHECK;
+                    if let Some((h, _)) = game_window(&self.exes).filter(|(h, _)| *h != s.hwnd) {
+                        tracing::info!("window capture: switching to window {:?}", h.0);
+                        self.drop_session(now);
+                    }
+                }
+            }
+            if self.session.is_some() || now < self.next_search {
+                return;
+            }
+            self.next_search = now + SEARCH;
+            self.found = game_window(&self.exes);
+            let Some((hwnd, _)) = self.found else {
+                self.failing_since = None;
+                return;
+            };
+            match self.start_session(hwnd) {
+                Ok(s) => {
+                    self.session = Some(s);
+                    self.next_recheck = now + RECHECK;
+                    self.failing_since = None;
+                    self.last_error = None;
+                }
+                Err(e) => {
+                    self.warn(&e);
+                    self.next_search = now + RETRY;
+                    let since = *self.failing_since.get_or_insert(now);
+                    if !self.toasted && now.duration_since(since) >= TOAST_AFTER {
+                        self.toasted = true;
+                        (self.notice)(CANT_CAPTURE.to_string());
+                    }
+                }
+            }
+        }
+
+        fn drop_session(&mut self, now: Instant) {
+            self.session = None;
+            self.found = None;
+            self.next_search = now;
+        }
+
+        fn start_session(&mut self, hwnd: HWND) -> Result<Session> {
+            let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()
+                .context("IGraphicsCaptureItemInterop")?;
+            let item: GraphicsCaptureItem =
+                unsafe { interop.CreateForWindow(hwnd) }.context("CreateForWindow")?;
+            let size = item.Size().context("capture item size")?;
+            let size = SizeInt32 { Width: size.Width.max(1), Height: size.Height.max(1) };
+            let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&self.device, FORMAT, 2, size)
+                .context("CreateFreeThreaded frame pool")?;
+            let session = pool.CreateCaptureSession(&item).context("CreateCaptureSession")?;
+            let _ = session.SetIsCursorCaptureEnabled(true);
+            if self.border_api && self.borderless() {
+                let r = session.SetIsBorderRequired(false);
+                if let Err(e) = r {
+                    tracing::info!("window capture: capture border not removable: {e}");
+                }
+            }
+            let closed = Arc::new(AtomicBool::new(false));
+            let flag = closed.clone();
+            let closed_token = item
+                .Closed(&TypedEventHandler::new(move |_, _| {
+                    flag.store(true, Ordering::SeqCst);
+                    Ok(())
+                }))
+                .context("Closed handler")?;
+            let s = Session { hwnd, item, pool, session, size, closed, closed_token, held: None, recreated: None };
+            s.session.StartCapture().context("StartCapture")?;
+            tracing::info!(
+                "window capture: capturing window {:?} ({}x{} frame)",
+                hwnd.0,
+                size.Width,
+                size.Height
+            );
+            Ok(s)
+        }
+
+        /// Asks once for borderless capture; on refusal the yellow border stays.
+        fn borderless(&mut self) -> bool {
+            *self.borderless.get_or_insert_with(|| {
+                let r = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+                    .and_then(|op| op.join());
+                match r {
+                    Ok(AppCapabilityAccessStatus::Allowed) => true,
+                    Ok(s) => {
+                        tracing::info!("window capture: borderless capture not allowed ({s:?}), border stays");
+                        false
+                    }
+                    Err(e) => {
+                        tracing::info!("window capture: borderless capture not available ({e}), border stays");
+                        false
+                    }
+                }
+            })
+        }
+
+        /// Drains the pool to its newest frame: the frame, its texture and the
+        /// client crop inside it. Recreates the pool when the window resized.
+        fn newest_frame(&mut self) -> Result<Option<(Direct3D11CaptureFrame, ID3D11Texture2D, Rect)>> {
+            let Some(s) = self.session.as_mut() else { return Ok(None) };
+            let mut newest: Option<Direct3D11CaptureFrame> = None;
+            while let Ok(f) = s.pool.TryGetNextFrame() {
+                if let Some(old) = newest.replace(f) {
+                    let _ = old.Close();
+                }
+            }
+            let Some(f) = newest else { return Ok(None) };
+            let content = f.ContentSize()?;
+            if (content.Width, content.Height) != (s.size.Width, s.size.Height) && content.Width > 0 && content.Height > 0
+            {
+                s.pool.Recreate(&self.device, FORMAT, 2, content).context("Recreate frame pool")?;
+                s.size = content;
+                s.recreated = Some(Instant::now());
+            } else {
+                s.recreated = None;
+            }
+            let access: IDirect3DDxgiInterfaceAccess = f.Surface()?.cast()?;
+            let tex: ID3D11Texture2D = unsafe { access.GetInterface() }?;
+            let mut desc = D3D11_TEXTURE2D_DESC::default();
+            unsafe { tex.GetDesc(&mut desc) };
+            let fw = desc.Width.min(content.Width.max(1) as u32);
+            let fh = desc.Height.min(content.Height.max(1) as u32);
+            let crop = fit(client_rect(s.hwnd, fw, fh), fw, fh);
+            Ok(Some((f, tex, crop)))
+        }
+
+        fn warn(&mut self, e: &anyhow::Error) {
+            let msg = format!("{e:#}");
+            if self.last_error.as_deref() != Some(&msg) {
+                tracing::warn!("window capture: {msg}");
+            }
+            self.last_error = Some(msg);
+        }
+
+        fn log_state(&mut self, found: bool, minimized: bool, capturing: bool) {
+            let state = (found, minimized, capturing);
+            if self.logged == Some(state) {
+                return;
+            }
+            let was = self.logged.replace(state);
+            let what = match state {
+                (false, ..) => "no game window",
+                (true, true, _) => "game window minimized",
+                (true, false, false) => "game window found, not captured",
+                (true, false, true) if was.is_some_and(|w| w.1) => "game window restored",
+                (true, false, true) => "game window captured",
+            };
+            tracing::info!("window capture: {what}");
+        }
+    }
+
+    /// Client area of `hwnd` inside its captured `fw` x `fh` frame; the whole
+    /// frame if the window cannot be measured.
+    fn client_rect(hwnd: HWND, fw: u32, fh: u32) -> Rect {
+        let full = Rect { x: 0, y: 0, w: fw, h: fh };
+        let mut b = RECT::default();
+        let mut c = RECT::default();
+        let mut origin = POINT::default();
+        unsafe {
+            if DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_EXTENDED_FRAME_BOUNDS,
+                (&mut b as *mut RECT).cast(),
+                std::mem::size_of::<RECT>() as u32,
+            )
+            .is_err()
+                || GetClientRect(hwnd, &mut c).is_err()
+                || !ClientToScreen(hwnd, &mut origin).as_bool()
+            {
+                return full;
+            }
+        }
+        client_crop(
+            fw,
+            fh,
+            (b.left, b.top, b.right, b.bottom),
+            (origin.x, origin.y, origin.x + c.right, origin.y + c.bottom),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test] fn fit_keeps_inside_frame() {
+        assert_eq!(fit(Rect { x: 8, y: 31, w: 1264, h: 681 }, 1280, 720), Rect { x: 8, y: 31, w: 1264, h: 681 });
+        assert_eq!(fit(Rect { x: 8, y: 31, w: 1264, h: 681 }, 800, 600), Rect { x: 8, y: 31, w: 792, h: 569 });
+        assert_eq!(fit(Rect { x: 900, y: 700, w: 10, h: 10 }, 800, 600), Rect { x: 799, y: 599, w: 1, h: 1 });
+    }
 
     #[test] fn letterbox_same_aspect() { assert_eq!(letterbox(3840, 2160, 1920, 1080), Rect { x: 0, y: 0, w: 1920, h: 1080 }); }
     #[test] fn letterbox_ultrawide() { assert_eq!(letterbox(3440, 1440, 1920, 1080), Rect { x: 0, y: 138, w: 1920, h: 804 }); }
@@ -123,3 +495,94 @@ mod tests {
         assert_eq!(decide(&s), WindowPicture::Black);
     }
 }
+
+/// Live window capture: needs an interactive desktop and a D3D11 GPU. Run with
+/// `cargo test --lib capture::window_grab -- --ignored`.
+#[cfg(all(test, windows))]
+mod live {
+    use super::test_window::*;
+    use crate::capture::hdr_grab::HdrGrabber;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[test]
+    #[ignore]
+    fn window_capture_shows_window_only() {
+        // 400x400 red window => pillarbox: centre is red, (100, 540) is black.
+        let _l = live_lock();
+        let win = TestWindow::open(400, 400, (255, 0, 0));
+        let mut rig = Rig::start();
+        let f = rig.last_frame_after(Duration::from_secs(2));
+        assert_near(y_at(&f, 960, 540), 63, 3);
+        assert_near(v_at(&f, 960, 540), 240, 3);
+        assert_eq!(y_at(&f, 100, 540), 16);
+        // Client edges (picture at x 420..1500, y 0..1080): no title bar or
+        // border blended in by the scaler.
+        for (x, y) in [(960, 0), (960, 1079), (420, 540), (1499, 540)] {
+            assert_near(y_at(&f, x, y), 63, 3);
+        }
+        drop(win);
+    }
+
+    #[test]
+    #[ignore]
+    fn minimized_window_is_black() {
+        // minimize => every Y 16, every UV 128 within 1 s; restore => red again within 1 s.
+        let _l = live_lock();
+        let win = TestWindow::open(400, 400, (255, 0, 0));
+        let mut rig = Rig::start();
+        rig.wait_for(Duration::from_secs(2), "red before minimize", red_centre);
+        win.minimize();
+        rig.wait_for(Duration::from_secs(1), "black while minimized", is_black);
+        win.restore();
+        rig.wait_for(Duration::from_secs(1), "red after restore", red_centre);
+    }
+
+    #[test]
+    #[ignore]
+    fn window_recreated_is_found_again() {
+        // close the window, open a new one (green) => black, then green centre within 2 s.
+        let _l = live_lock();
+        let win = TestWindow::open(400, 400, (255, 0, 0));
+        let mut rig = Rig::start();
+        rig.wait_for(Duration::from_secs(2), "red first window", red_centre);
+        win.close();
+        rig.wait_for(Duration::from_secs(1), "black after close", is_black);
+        let _green = TestWindow::open(400, 400, (0, 255, 0));
+        rig.wait_for(Duration::from_secs(2), "green second window", green_centre);
+    }
+
+    #[test]
+    #[ignore]
+    fn resize_keeps_aspect() {
+        // resize 400x400 => 800x400 (client): before, (100, 540) black (pillarbox);
+        // after, letterbox 1920x960 at y 60: (100, 540) red, (960, 30) black.
+        let _l = live_lock();
+        let win = TestWindow::open(400, 400, (255, 0, 0));
+        let mut rig = Rig::start();
+        let f = rig.wait_for(Duration::from_secs(2), "red before resize", red_centre);
+        assert_eq!(y_at(&f, 100, 540), 16);
+        win.resize(800, 400);
+        rig.wait_for(Duration::from_secs(2), "letterboxed after resize", |f| {
+            near(y_at(f, 100, 540), 63, 3) && y_at(f, 960, 30) == 16 && red_centre(f)
+        });
+    }
+
+    #[test]
+    #[ignore]
+    fn no_window_yet_is_black() {
+        // exes = ["clipvault-no-such-game.exe"] => frames flow and are all black.
+        let _l = live_lock();
+        let cfg = config(vec!["clipvault-no-such-game.exe".into()], 1.0);
+        let name = cfg.pipe_name.clone();
+        let _g = HdrGrabber::start(cfg, Arc::new(|_| {})).expect("start grabber");
+        let frames = read_frames(&name, 30);
+        assert_eq!(frames.len(), 30);
+        for (i, f) in frames.iter().enumerate() {
+            assert!(is_black(f), "frame {i} not black");
+        }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod test_window;

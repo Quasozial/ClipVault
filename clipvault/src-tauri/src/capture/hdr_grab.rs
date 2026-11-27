@@ -64,7 +64,14 @@ pub struct HdrGrabConfig {
     /// SDR white in scRGB units (e.g. 3.0 for 240 nits).
     pub sdr_white: f32,
     pub pipe_name: String,
+    /// `Some`: record the main window of a running process with one of these
+    /// exe names (lowercase file names) with Windows.Graphics.Capture;
+    /// `output_idx` is then only the fallback when WGC is not supported.
+    pub window_exes: Option<Vec<String>>,
 }
+
+/// One-time user-facing message from the grabber (shown as a toast).
+pub type Notice = Arc<dyn Fn(String) + Send + Sync>;
 
 /// What the shader draws: the `src` rectangle of the captured frame (source
 /// pixels) scaled into the `dst` rectangle of the output picture, black
@@ -243,7 +250,7 @@ impl HdrGrabber {
     /// Open the output and start capturing. Fails (e.g. `Failed to enumerate
     /// DXGI output 2`) before returning if the GPU side cannot be set up; the
     /// pipe is listening when this returns.
-    pub fn start(cfg: HdrGrabConfig) -> Result<HdrGrabber> {
+    pub fn start(cfg: HdrGrabConfig, notice: Notice) -> Result<HdrGrabber> {
         if cfg.out_w == 0 || cfg.out_h == 0 || cfg.out_w % 4 != 0 || cfg.out_h % 2 != 0 || cfg.fps == 0 {
             bail!("unsupported HDR capture size {}x{}@{}", cfg.out_w, cfg.out_h, cfg.fps);
         }
@@ -253,7 +260,7 @@ impl HdrGrabber {
         let (st, p) = (stop.clone(), pipe.clone());
         let thread = std::thread::Builder::new()
             .name("hdr-grab".into())
-            .spawn(move || imp::run(cfg, &p, &st, ready_tx))?;
+            .spawn(move || imp::run(cfg, notice, &p, &st, ready_tx))?;
         match ready_rx.recv() {
             Ok(Ok(())) => Ok(HdrGrabber { stop, thread: Some(thread), pipe: Some(pipe) }),
             Ok(Err(e)) => {
@@ -286,7 +293,10 @@ impl Drop for HdrGrabber {
 #[cfg(windows)]
 mod imp {
     use super::*;
+    use crate::capture::window_grab::{fit, letterbox, WindowPicture, WindowSource};
     use windows::core::{s, Interface};
+    use windows::Graphics::Capture::GraphicsCaptureSession;
+    use windows::Win32::System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED};
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_OPTIMIZATION_LEVEL3};
     use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0};
@@ -330,8 +340,11 @@ mod imp {
     struct Gpu {
         device: ID3D11Device,
         ctx: ID3D11DeviceContext,
-        output: IDXGIOutput5,
+        /// The duplicated monitor; `None` for the window source.
+        output: Option<IDXGIOutput5>,
         dup: Option<IDXGIOutputDuplication>,
+        /// 1x1 texture bound as the source of black pictures before any frame.
+        blank: ID3D11ShaderResourceView,
         cs: ID3D11ComputeShader,
         cbuf: ID3D11Buffer,
         sampler: ID3D11SamplerState,
@@ -349,11 +362,39 @@ mod imp {
 
     pub(super) fn run(
         cfg: HdrGrabConfig,
+        notice: Notice,
         pipe: &FramePipe,
         stop: &AtomicBool,
         ready: std::sync::mpsc::Sender<Result<()>>,
     ) {
-        let mut gpu = match Gpu::new(&cfg) {
+        // Windows.Graphics.Capture objects live on this thread. The MTA is
+        // kept alive for the whole process: grabber threads come and go, and
+        // windows-rs caches activation factories (e.g. for `IsSupported`)
+        // process-wide; tearing the MTA down with the last grabber thread
+        // left those dangling (access violation on the next start).
+        static MTA: std::sync::Once = std::sync::Once::new();
+        MTA.call_once(|| unsafe {
+            if let Err(e) = windows::Win32::System::Com::CoIncrementMTAUsage() {
+                tracing::warn!("native capture: CoIncrementMTAUsage: {e}");
+            }
+        });
+        unsafe {
+            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        }
+        let mut cfg = cfg;
+        if cfg.window_exes.is_some() && !GraphicsCaptureSession::IsSupported().unwrap_or(false) {
+            tracing::warn!("native capture: window capture not supported, recording output {}", cfg.output_idx);
+            notice("Window capture not supported – recording the monitor".into());
+            cfg.window_exes = None;
+        }
+        let setup = Gpu::new(&cfg, cfg.window_exes.is_some()).and_then(|gpu| {
+            let source = match &cfg.window_exes {
+                Some(exes) => Some(WindowSource::new(&gpu.device, exes.clone(), notice.clone())?),
+                None => None,
+            };
+            Ok((gpu, source))
+        });
+        let (mut gpu, mut source) = match setup {
             Ok(g) => g,
             Err(e) => {
                 let _ = ready.send(Err(e));
@@ -369,15 +410,32 @@ mod imp {
         let mut next_staging = 0usize;
         let mut last_error: Option<String> = None;
         let mut retry_dup_at = Instant::now();
-        let (mut frames, mut new_frames, mut stats_at) = (0u64, 0u64, Instant::now());
-        tracing::info!(
-            "native capture on output {} -> {}x{}@{} NV12, SDR white {}",
-            cfg.output_idx,
-            cfg.out_w,
-            cfg.out_h,
-            cfg.fps,
-            cfg.sdr_white
-        );
+        let (mut frames, mut new_frames, mut black, mut stats_at) = (0u64, 0u64, 0u64, Instant::now());
+        // Window source: the picture re-sent while the window shows no new frame.
+        let mut last_view: Option<View> = None;
+        let black_view = View {
+            src: Rect { x: 0, y: 0, w: 1, h: 1 },
+            dst: Rect { x: 0, y: 0, w: cfg.out_w, h: cfg.out_h },
+            black: true,
+        };
+        match &cfg.window_exes {
+            Some(exes) => tracing::info!(
+                "native capture: window of {} -> {}x{}@{} NV12, SDR white {}",
+                exes.join("/"),
+                cfg.out_w,
+                cfg.out_h,
+                cfg.fps,
+                cfg.sdr_white
+            ),
+            None => tracing::info!(
+                "native capture on output {} -> {}x{}@{} NV12, SDR white {}",
+                cfg.output_idx,
+                cfg.out_w,
+                cfg.out_h,
+                cfg.fps,
+                cfg.sdr_white
+            ),
+        }
         while !stop.load(Ordering::SeqCst) {
             // Sleep until just before the next epoch-aligned frame boundary.
             let now = epoch_secs();
@@ -395,6 +453,39 @@ mod imp {
                     }
                     Err(e) => report(&mut last_error, &e.context("reading back frame")),
                 }
+            }
+
+            // 1+3 for the window source: newest window frame, letterboxed.
+            if let Some(src) = source.as_mut() {
+                let view = match src.poll(Instant::now()) {
+                    (WindowPicture::New, Some((tex, crop))) => match gpu.copy_frame(&tex) {
+                        Ok(()) => {
+                            new_frames += 1;
+                            let (fw, fh) = gpu.frame.as_ref().map_or((1, 1), |f| (f.2, f.3));
+                            let crop = fit(crop, fw, fh);
+                            let v = View { src: crop, dst: letterbox(crop.w, crop.h, cfg.out_w, cfg.out_h), black: false };
+                            last_view = Some(v);
+                            v
+                        }
+                        Err(e) => {
+                            report(&mut last_error, &e.context("copying window frame"));
+                            last_view.unwrap_or(black_view)
+                        }
+                    },
+                    (WindowPicture::Same, _) => last_view.unwrap_or(black_view),
+                    _ => {
+                        last_view = None;
+                        black_view
+                    }
+                };
+                if view.black {
+                    black += 1;
+                }
+                gpu.dispatch(&cfg, next_staging, &view);
+                pending = Some(next_staging);
+                next_staging ^= 1;
+                log_stats(pipe, &mut frames, &mut new_frames, &mut black, &mut stats_at);
+                continue;
             }
 
             // 1. Newest desktop frame, if any.
@@ -428,13 +519,17 @@ mod imp {
                 next_staging ^= 1;
             }
 
-            if stats_at.elapsed() >= Duration::from_secs(60) {
-                tracing::debug!(
-                    "native capture: {frames} frames sent, {new_frames} new desktop frames, {} dropped at pipe",
-                    pipe.shared.dropped.load(Ordering::Relaxed)
-                );
-                (frames, new_frames, stats_at) = (0, 0, Instant::now());
-            }
+            log_stats(pipe, &mut frames, &mut new_frames, &mut black, &mut stats_at);
+        }
+    }
+
+    fn log_stats(pipe: &FramePipe, frames: &mut u64, new_frames: &mut u64, black: &mut u64, at: &mut Instant) {
+        if at.elapsed() >= Duration::from_secs(60) {
+            tracing::debug!(
+                "native capture: {frames} frames sent, {new_frames} new frames, {black} black, {} dropped at pipe",
+                pipe.shared.dropped.load(Ordering::Relaxed)
+            );
+            (*frames, *new_frames, *black, *at) = (0, 0, 0, Instant::now());
         }
     }
 
@@ -447,26 +542,33 @@ mod imp {
     }
 
     impl Gpu {
-        fn new(cfg: &HdrGrabConfig) -> Result<Gpu> {
+        /// `window`: the window source (no monitor to duplicate).
+        fn new(cfg: &HdrGrabConfig, window: bool) -> Result<Gpu> {
             unsafe {
                 // Desktop Duplication (DuplicateOutput1) needs per-monitor DPI
-                // awareness; the app already has it (tao), tests do not.
+                // awareness, and so do the window geometry calls (physical
+                // pixels); the app already has it (tao), tests do not.
                 let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
                 let factory: IDXGIFactory1 = CreateDXGIFactory1().context("CreateDXGIFactory1")?;
                 let adapter = factory.EnumAdapters1(0).context("no DXGI adapter 0")?;
-                let output = adapter
-                    .EnumOutputs(cfg.output_idx)
-                    .map_err(|_| anyhow!("Failed to enumerate DXGI output {}", cfg.output_idx))?;
-                let output: IDXGIOutput5 = output.cast().context("IDXGIOutput5 not supported")?;
+                let output = if window {
+                    None
+                } else {
+                    let output = adapter
+                        .EnumOutputs(cfg.output_idx)
+                        .map_err(|_| anyhow!("Failed to enumerate DXGI output {}", cfg.output_idx))?;
+                    Some(output.cast::<IDXGIOutput5>().context("IDXGIOutput5 not supported")?)
+                };
 
                 let mut device = None;
                 let mut ctx = None;
+                // BGRA support: required by Windows.Graphics.Capture.
                 D3D11CreateDevice(
                     &adapter,
                     D3D_DRIVER_TYPE_UNKNOWN,
                     HMODULE::default(),
-                    D3D11_CREATE_DEVICE_FLAG(0),
+                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
                     Some(&[D3D_FEATURE_LEVEL_11_0]),
                     D3D11_SDK_VERSION,
                     Some(&mut device),
@@ -549,11 +651,33 @@ mod imp {
                 device.CreateBuffer(&staging_desc, None, Some(&mut s0))?;
                 device.CreateBuffer(&staging_desc, None, Some(&mut s1))?;
 
+                let zero = [0u16; 4];
+                let mut blank_tex = None;
+                device.CreateTexture2D(
+                    &D3D11_TEXTURE2D_DESC {
+                        Width: 1,
+                        Height: 1,
+                        MipLevels: 1,
+                        ArraySize: 1,
+                        Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+                        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+                        Usage: D3D11_USAGE_IMMUTABLE,
+                        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+                        ..Default::default()
+                    },
+                    Some(&D3D11_SUBRESOURCE_DATA { pSysMem: zero.as_ptr().cast(), SysMemPitch: 8, SysMemSlicePitch: 0 }),
+                    Some(&mut blank_tex),
+                )?;
+                let blank_tex: ID3D11Texture2D = blank_tex.context("blank texture")?;
+                let mut blank = None;
+                device.CreateShaderResourceView(&blank_tex, None, Some(&mut blank))?;
+
                 let mut gpu = Gpu {
                     device,
                     ctx,
                     output,
                     dup: None,
+                    blank: blank.context("blank view")?,
                     cs,
                     cbuf: cbuf.context("constant buffer")?,
                     sampler: sampler.context("sampler")?,
@@ -567,13 +691,16 @@ mod imp {
                     shape_buf: Vec::new(),
                     params: Params::default(),
                 };
-                gpu.duplicate()?;
+                if gpu.output.is_some() {
+                    gpu.duplicate()?;
+                }
                 Ok(gpu)
             }
         }
 
         fn duplicate(&mut self) -> Result<()> {
-            let dup = unsafe { self.output.DuplicateOutput1(&self.device, 0, &[DXGI_FORMAT_R16G16B16A16_FLOAT]) }
+            let output = self.output.as_ref().context("no output to duplicate")?;
+            let dup = unsafe { output.DuplicateOutput1(&self.device, 0, &[DXGI_FORMAT_R16G16B16A16_FLOAT]) }
                 .context("DuplicateOutput1 (FP16)")?;
             self.dup = Some(dup);
             Ok(())
@@ -616,6 +743,12 @@ mod imp {
                 return Ok(false); // mouse-only update
             }
             let tex: ID3D11Texture2D = res.context("no frame resource")?.cast()?;
+            self.copy_frame(&tex)?;
+            Ok(true)
+        }
+
+        /// Copies `tex` into our frame texture, (re)created at its size.
+        fn copy_frame(&mut self, tex: &ID3D11Texture2D) -> Result<()> {
             let mut desc = D3D11_TEXTURE2D_DESC::default();
             unsafe { tex.GetDesc(&mut desc) };
             let resize = !matches!(&self.frame, Some((_, _, w, h)) if *w == desc.Width && *h == desc.Height);
@@ -644,8 +777,8 @@ mod imp {
                 self.frame = Some((copy, srv.context("frame view")?, desc.Width, desc.Height));
             }
             let (copy, ..) = self.frame.as_ref().unwrap();
-            unsafe { self.ctx.CopyResource(copy, &tex) };
-            Ok(true)
+            unsafe { self.ctx.CopyResource(copy, tex) };
+            Ok(())
         }
 
         fn update_cursor(&mut self, dup: &IDXGIOutputDuplication, size: u32) -> Result<()> {
@@ -691,8 +824,13 @@ mod imp {
         /// Converts the current frame into staging buffer `staging`, drawing
         /// `view.src` (frame pixels) into `view.dst` (output pixels).
         fn dispatch(&mut self, cfg: &HdrGrabConfig, staging: usize, view: &View) {
-            let Some((_, srv, sw, sh)) = self.frame.clone() else { return };
-            let cursor = self.cursor.as_ref().filter(|_| self.cursor_visible);
+            let (srv, sw, sh) = match self.frame.clone() {
+                Some((_, srv, w, h)) => (srv, w, h),
+                None if view.black => (self.blank.clone(), 1, 1),
+                None => return,
+            };
+            // The window source has the cursor in its frames (WGC draws it).
+            let cursor = self.cursor.as_ref().filter(|_| self.cursor_visible && self.output.is_some());
             let (src, dst) = (view.src, view.dst);
             let p = Params {
                 out_size: [cfg.out_w, cfg.out_h],
@@ -784,7 +922,7 @@ mod imp {
 #[cfg(not(windows))]
 mod imp {
     use super::*;
-    pub(super) fn run(_: HdrGrabConfig, _: &FramePipe, _: &AtomicBool, ready: std::sync::mpsc::Sender<Result<()>>) {
+    pub(super) fn run(_: HdrGrabConfig, _: Notice, _: &FramePipe, _: &AtomicBool, ready: std::sync::mpsc::Sender<Result<()>>) {
         let _ = ready.send(Err(anyhow!("native capture needs Windows")));
     }
 }
@@ -929,7 +1067,8 @@ mod tests {
             out_h: 1080,
             sdr_white: 3.0,
             pipe_name: hdr_pipe_name(&spec),
-        })
+            window_exes: None,
+        }, Arc::new(|_| {}))
         .unwrap();
         let log = std::fs::File::create(dir.join("ffmpeg.log")).unwrap();
         let mut child = std::process::Command::new(ffmpeg)
@@ -949,8 +1088,8 @@ mod tests {
     #[ignore]
     fn hdr_grab_live() {
         let name = format!("clipvault_test_{}", uuid::Uuid::new_v4().simple());
-        let cfg = HdrGrabConfig { output_idx: 0, fps: 60, out_w: 1920, out_h: 1080, sdr_white: 3.0, pipe_name: name.clone() };
-        let g = HdrGrabber::start(cfg).expect("start");
+        let cfg = HdrGrabConfig { output_idx: 0, fps: 60, out_w: 1920, out_h: 1080, sdr_white: 3.0, pipe_name: name.clone(), window_exes: None };
+        let g = HdrGrabber::start(cfg, Arc::new(|_| {})).expect("start");
         let mut f = std::fs::File::open(format!(r"\\.\pipe\{name}")).unwrap();
         let size = nv12_size(1920, 1080);
         let mut buf = vec![0u8; size];

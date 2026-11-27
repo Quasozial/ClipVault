@@ -590,7 +590,7 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         // opens it. It never needs a desktop kick.
         let mut grabber: Option<HdrGrabber> = None;
         if let Some(cfg) = hdr_grab_config(&spec) {
-            let failed = match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg)).await {
+            let failed = match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg, Arc::new(|_| {}))).await {
                 Ok(Ok(g)) => {
                     grabber = Some(g);
                     None
@@ -714,6 +714,7 @@ fn hdr_grab_config(spec: &CaptureSpec) -> Option<HdrGrabConfig> {
         out_h: spec.out_h,
         sdr_white: white,
         pipe_name: hdr_pipe_name(spec),
+        window_exes: None,
     })
 }
 
