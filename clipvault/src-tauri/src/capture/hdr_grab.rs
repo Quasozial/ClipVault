@@ -378,8 +378,8 @@ mod imp {
                 tracing::warn!("native capture: CoIncrementMTAUsage: {e}");
             }
         });
-        unsafe {
-            let _ = RoInitialize(RO_INIT_MULTITHREADED);
+        if let Err(e) = unsafe { RoInitialize(RO_INIT_MULTITHREADED) } {
+            tracing::warn!("native capture: RoInitialize: {e}");
         }
         let mut cfg = cfg;
         if cfg.window_exes.is_some() && !GraphicsCaptureSession::IsSupported().unwrap_or(false) {

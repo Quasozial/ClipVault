@@ -1,5 +1,6 @@
 //! Game window capture (Windows.Graphics.Capture): pure geometry and picture
 //! decision helpers, platform independent so they can be unit tested.
+use std::time::{Duration, Instant};
 
 /// Pixel rectangle inside a frame or output picture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -91,6 +92,30 @@ pub fn fit(r: Rect, w: u32, h: u32) -> Rect {
     Rect { x, y, w: r.w.min(w - x.min(w)).max(1), h: r.h.min(h - y.min(h)).max(1) }
 }
 
+/// No frame at the new size this long after a frame-pool recreate: restart
+/// the session (a static window sends nothing after `Recreate`).
+pub const RESIZE_WAIT: Duration = Duration::from_millis(250);
+/// At most one resize restart per window this often, so a persistent size
+/// mismatch cannot churn sessions.
+pub const RESTART_GAP: Duration = Duration::from_secs(2);
+/// A session without a single frame for this long while the window is shown
+/// counts as "found but not captured"; also the toast delay.
+pub const STALL: Duration = Duration::from_secs(10);
+
+/// Whether a session whose pool was recreated at `recreated` (and is still
+/// waiting for a frame at the new size) should be restarted now, given the
+/// last resize restart of the same window.
+pub fn resize_restart_due(recreated: Option<Instant>, last_restart: Option<Instant>, now: Instant) -> bool {
+    recreated.is_some_and(|t| now.saturating_duration_since(t) >= RESIZE_WAIT)
+        && last_restart.is_none_or(|t| now.saturating_duration_since(t) >= RESTART_GAP)
+}
+
+/// Whether a session that has never delivered a frame is stalled: the window
+/// has been shown (not minimized) since `shown_since` for [`STALL`].
+pub fn stalled(got_frame: bool, shown_since: Option<Instant>, now: Instant) -> bool {
+    !got_frame && shown_since.is_some_and(|t| now.saturating_duration_since(t) >= STALL)
+}
+
 #[cfg(windows)]
 pub(crate) use source::WindowSource;
 
@@ -134,10 +159,8 @@ mod source {
     const RECHECK: Duration = Duration::from_secs(2);
     /// Retry after a failed `CreateForWindow`/`StartCapture`.
     const RETRY: Duration = Duration::from_secs(2);
-    /// No frame at the new size this long after a pool recreate: restart.
-    const RESIZE_WAIT: Duration = Duration::from_millis(250);
     /// Found but not captured this long: tell the user once.
-    const TOAST_AFTER: Duration = Duration::from_secs(10);
+    const TOAST_AFTER: Duration = STALL;
     const FORMAT: DirectXPixelFormat = DirectXPixelFormat::R16G16B16A16Float;
     pub const CANT_CAPTURE: &str = "Can't capture the game window – switch Game capture to Whole monitor in Settings";
 
@@ -156,6 +179,10 @@ mod source {
         /// When the pool was last recreated for a new size, until a frame at
         /// that size arrives.
         recreated: Option<Instant>,
+        /// Any frame delivered since the session started.
+        got_frame: bool,
+        /// Since when the window is shown (not minimized); `None` while minimized.
+        shown_since: Option<Instant>,
     }
 
     impl Drop for Session {
@@ -189,6 +216,10 @@ mod source {
         have_last: bool,
         /// (found, minimized, capturing) last logged.
         logged: Option<(bool, bool, bool)>,
+        /// Last resize restart: window and time (caps restarts).
+        resize_restart: Option<(HWND, Instant)>,
+        /// Window of the last session started (repeat starts log at debug).
+        last_started: Option<HWND>,
     }
 
     impl WindowSource {
@@ -218,6 +249,8 @@ mod source {
                 borderless: None,
                 have_last: false,
                 logged: None,
+                resize_restart: None,
+                last_started: None,
             })
         }
 
@@ -230,13 +263,16 @@ mod source {
                 None => self.found.map_or((false, false), |(_, m)| (true, m)),
             };
             let capturing = self.session.is_some();
-            let frame = match self.newest_frame() {
+            let frame = match self.newest_frame(now) {
                 Ok(f) => f,
                 Err(e) => {
                     self.warn(&e.context("capture frame"));
                     None
                 }
             };
+            if frame.is_some() && self.failing_since.take().is_some() {
+                self.last_error = None;
+            }
             let pic = decide(&PictureState { found, minimized, capturing, new_frame: frame.is_some(), have_last: self.have_last });
             self.log_state(found, minimized, capturing);
             match pic {
@@ -258,18 +294,35 @@ mod source {
 
         /// Finds, starts, re-checks and drops the capture session.
         fn track(&mut self, now: Instant) {
-            if let Some(s) = &self.session {
-                if !unsafe { IsWindow(Some(s.hwnd)) }.as_bool() || s.closed.load(Ordering::SeqCst) {
-                    tracing::info!("window capture: window {:?} closed", s.hwnd.0);
+            if let Some(s) = self.session.as_mut() {
+                let hwnd = s.hwnd;
+                if unsafe { IsIconic(hwnd) }.as_bool() {
+                    s.shown_since = None;
+                } else if s.shown_since.is_none() {
+                    s.shown_since = Some(now);
+                }
+                let last_restart = self.resize_restart.filter(|(h, _)| *h == hwnd).map(|(_, t)| t);
+                if !unsafe { IsWindow(Some(hwnd)) }.as_bool() || s.closed.load(Ordering::SeqCst) {
+                    tracing::info!("window capture: window {:?} closed", hwnd.0);
                     self.drop_session(now);
-                } else if s.recreated.is_some_and(|t| now.duration_since(t) >= RESIZE_WAIT) {
+                } else if stalled(s.got_frame, s.shown_since, now) {
+                    // Started, shown, but never a frame: not captured. Retry
+                    // like a failed start; not captured since it was shown.
+                    let shown = s.shown_since.unwrap_or(now);
+                    self.warn(&anyhow::anyhow!("no frames from window {:?} for {}s", hwnd.0, STALL.as_secs()));
+                    self.drop_session(now);
+                    self.found = Some((hwnd, false));
+                    self.next_search = now + RETRY;
+                    self.failing(shown, now);
+                } else if resize_restart_due(s.recreated, last_restart, now) {
                     // A static window sends no frame after the pool was
                     // recreated at its new size; a new session always does.
                     tracing::debug!("window capture: no frame after resize, restarting the session");
+                    self.resize_restart = Some((hwnd, now));
                     self.drop_session(now);
                 } else if now >= self.next_recheck {
                     self.next_recheck = now + RECHECK;
-                    if let Some((h, _)) = game_window(&self.exes).filter(|(h, _)| *h != s.hwnd) {
+                    if let Some((h, _)) = game_window(&self.exes).filter(|(h, _)| *h != hwnd) {
                         tracing::info!("window capture: switching to window {:?}", h.0);
                         self.drop_session(now);
                     }
@@ -288,18 +341,23 @@ mod source {
                 Ok(s) => {
                     self.session = Some(s);
                     self.next_recheck = now + RECHECK;
-                    self.failing_since = None;
-                    self.last_error = None;
                 }
                 Err(e) => {
                     self.warn(&e);
                     self.next_search = now + RETRY;
-                    let since = *self.failing_since.get_or_insert(now);
-                    if !self.toasted && now.duration_since(since) >= TOAST_AFTER {
-                        self.toasted = true;
-                        (self.notice)(CANT_CAPTURE.to_string());
-                    }
+                    self.failing(now, now);
                 }
+            }
+        }
+
+        /// The window is found but not captured (failed start or no frames):
+        /// toast once per capture when that lasts [`TOAST_AFTER`]. Cleared by
+        /// the first frame or when the window disappears.
+        fn failing(&mut self, since: Instant, now: Instant) {
+            let since = *self.failing_since.get_or_insert(since);
+            if !self.toasted && now.saturating_duration_since(since) >= TOAST_AFTER {
+                self.toasted = true;
+                (self.notice)(CANT_CAPTURE.to_string());
             }
         }
 
@@ -319,7 +377,9 @@ mod source {
             let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&self.device, FORMAT, 2, size)
                 .context("CreateFreeThreaded frame pool")?;
             let session = pool.CreateCaptureSession(&item).context("CreateCaptureSession")?;
-            let _ = session.SetIsCursorCaptureEnabled(true);
+            if let Err(e) = session.SetIsCursorCaptureEnabled(true) {
+                tracing::debug!("window capture: cursor capture not enabled: {e}");
+            }
             if self.border_api && self.borderless() {
                 let r = session.SetIsBorderRequired(false);
                 if let Err(e) = r {
@@ -334,14 +394,31 @@ mod source {
                     Ok(())
                 }))
                 .context("Closed handler")?;
-            let s = Session { hwnd, item, pool, session, size, closed, closed_token, held: None, recreated: None };
+            let s = Session {
+                hwnd,
+                item,
+                pool,
+                session,
+                size,
+                closed,
+                closed_token,
+                held: None,
+                recreated: None,
+                got_frame: false,
+                shown_since: None,
+            };
             s.session.StartCapture().context("StartCapture")?;
-            tracing::info!(
-                "window capture: capturing window {:?} ({}x{} frame)",
-                hwnd.0,
-                size.Width,
-                size.Height
-            );
+            // Restarts of the same window (resize, stall retry) log at debug.
+            if self.last_started.replace(hwnd) == Some(hwnd) {
+                tracing::debug!("window capture: restarted capture of window {:?}", hwnd.0);
+            } else {
+                tracing::info!(
+                    "window capture: capturing window {:?} ({}x{} frame)",
+                    hwnd.0,
+                    size.Width,
+                    size.Height
+                );
+            }
             Ok(s)
         }
 
@@ -366,7 +443,9 @@ mod source {
 
         /// Drains the pool to its newest frame: the frame, its texture and the
         /// client crop inside it. Recreates the pool when the window resized.
-        fn newest_frame(&mut self) -> Result<Option<(Direct3D11CaptureFrame, ID3D11Texture2D, Rect)>> {
+        /// A failed `Recreate` drops the session (it is started again through
+        /// the normal search) instead of retrying every tick.
+        fn newest_frame(&mut self, now: Instant) -> Result<Option<(Direct3D11CaptureFrame, ID3D11Texture2D, Rect)>> {
             let Some(s) = self.session.as_mut() else { return Ok(None) };
             let mut newest: Option<Direct3D11CaptureFrame> = None;
             while let Ok(f) = s.pool.TryGetNextFrame() {
@@ -375,12 +454,17 @@ mod source {
                 }
             }
             let Some(f) = newest else { return Ok(None) };
+            s.got_frame = true;
             let content = f.ContentSize()?;
             if (content.Width, content.Height) != (s.size.Width, s.size.Height) && content.Width > 0 && content.Height > 0
             {
-                s.pool.Recreate(&self.device, FORMAT, 2, content).context("Recreate frame pool")?;
+                if let Err(e) = s.pool.Recreate(&self.device, FORMAT, 2, content) {
+                    let _ = f.Close();
+                    self.drop_session(now);
+                    return Err(anyhow::Error::from(e).context("Recreate frame pool, restarting the session"));
+                }
                 s.size = content;
-                s.recreated = Some(Instant::now());
+                s.recreated = Some(now);
             } else {
                 s.recreated = None;
             }
@@ -453,6 +537,26 @@ mod source {
 mod tests {
     use super::*;
 
+    #[test] fn resize_restart_waits_then_is_capped() {
+        let t0 = Instant::now();
+        let ms = |n| t0 + Duration::from_millis(n);
+        assert!(!resize_restart_due(None, None, ms(5000)), "no recreate pending");
+        assert!(!resize_restart_due(Some(t0), None, ms(249)), "frame may still come");
+        assert!(resize_restart_due(Some(t0), None, ms(250)));
+        // Persistent mismatch: restarted at 250 ms, recreated again at 300 ms.
+        assert!(!resize_restart_due(Some(ms(300)), Some(ms(250)), ms(600)), "capped");
+        assert!(!resize_restart_due(Some(ms(300)), Some(ms(250)), ms(2249)), "capped");
+        assert!(resize_restart_due(Some(ms(300)), Some(ms(250)), ms(2250)), "one per 2 s");
+    }
+    #[test] fn stall_needs_ten_shown_seconds_without_any_frame() {
+        let t0 = Instant::now();
+        let s = |n| t0 + Duration::from_secs(n);
+        assert!(!stalled(false, Some(t0), s(9)));
+        assert!(stalled(false, Some(t0), s(10)));
+        assert!(!stalled(true, Some(t0), s(60)), "a static window after its first frame is fine");
+        assert!(!stalled(false, None, s(60)), "minimized does not count");
+        assert!(!stalled(false, Some(s(50)), s(59)), "shown time restarts after a restore");
+    }
     #[test] fn fit_keeps_inside_frame() {
         assert_eq!(fit(Rect { x: 8, y: 31, w: 1264, h: 681 }, 1280, 720), Rect { x: 8, y: 31, w: 1264, h: 681 });
         assert_eq!(fit(Rect { x: 8, y: 31, w: 1264, h: 681 }, 800, 600), Rect { x: 8, y: 31, w: 792, h: 569 });
