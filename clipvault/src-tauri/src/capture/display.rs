@@ -251,6 +251,7 @@ pub fn pick_game_window<'a>(cands: &'a [WindowCandidate], exes: &[String]) -> Op
 pub fn game_window(exes: &[String]) -> Option<(windows::Win32::Foundation::HWND, bool)> {
     use std::collections::HashMap;
     use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
     use windows::Win32::System::Threading::{
         OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
     };
@@ -277,11 +278,23 @@ pub fn game_window(exes: &[String]) -> Option<(windows::Win32::Foundation::HWND,
         path.rsplit(['\\', '/']).next().map(str::to_ascii_lowercase).filter(|n| !n.is_empty())
     }
 
+    /// Cloaked by DWM (other virtual desktop, suspended UWP frame, hidden
+    /// shell window): visible to `IsWindowVisible` but never on screen.
+    fn cloaked(hwnd: HWND) -> bool {
+        let mut c = 0u32;
+        // SAFETY: c is a live u32 and its size is passed.
+        let r = unsafe {
+            DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, (&mut c as *mut u32).cast(), size_of::<u32>() as u32)
+        };
+        r.is_ok() && c != 0
+    }
+
     unsafe extern "system" fn visit(hwnd: HWND, lp: LPARAM) -> BOOL {
         // SAFETY: lp is the &mut Search passed to EnumWindows below, alive for the call.
         let s = unsafe { &mut *(lp.0 as *mut Search) };
         if !unsafe { IsWindowVisible(hwnd) }.as_bool()
             || unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid())
+            || cloaked(hwnd)
         {
             return true.into();
         }

@@ -129,7 +129,7 @@ mod source {
     use crate::capture::hdr_grab::Notice;
     use anyhow::{Context, Result};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
+    use std::sync::{Arc, OnceLock};
     use std::time::{Duration, Instant};
     use windows::core::{Interface, HSTRING};
     use windows::Foundation::Metadata::ApiInformation;
@@ -196,6 +196,27 @@ mod source {
         }
     }
 
+    /// Borderless capture access, asked at most once per process (the request
+    /// blocks until answered); on refusal the yellow border stays.
+    fn borderless_allowed() -> bool {
+        static BORDERLESS: OnceLock<bool> = OnceLock::new();
+        *BORDERLESS.get_or_init(|| {
+            let r = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
+                .and_then(|op| op.join());
+            match r {
+                Ok(AppCapabilityAccessStatus::Allowed) => true,
+                Ok(s) => {
+                    tracing::info!("window capture: borderless capture not allowed ({s:?}), border stays");
+                    false
+                }
+                Err(e) => {
+                    tracing::info!("window capture: borderless capture not available ({e}), border stays");
+                    false
+                }
+            }
+        })
+    }
+
     pub(crate) struct WindowSource {
         device: IDirect3DDevice,
         exes: Vec<String>,
@@ -209,10 +230,9 @@ mod source {
         failing_since: Option<Instant>,
         toasted: bool,
         last_error: Option<String>,
-        /// `IsBorderRequired` exists (Windows 11 / 10 2104+).
-        border_api: bool,
-        /// Borderless access granted (`None`: not asked yet).
-        borderless: Option<bool>,
+        /// `IsBorderRequired` exists (Windows 11 / 10 2104+) and borderless
+        /// access was granted (see [`borderless_allowed`]).
+        borderless: bool,
         have_last: bool,
         /// (found, minimized, capturing) last logged.
         logged: Option<(bool, bool, bool)>,
@@ -233,6 +253,8 @@ mod source {
                 &HSTRING::from("IsBorderRequired"),
             )
             .unwrap_or(false);
+            // Resolved here, before the grabber reports ready, never in the tick.
+            let borderless = border_api && borderless_allowed();
             let now = Instant::now();
             Ok(WindowSource {
                 device,
@@ -245,8 +267,7 @@ mod source {
                 failing_since: None,
                 toasted: false,
                 last_error: None,
-                border_api,
-                borderless: None,
+                borderless,
                 have_last: false,
                 logged: None,
                 resize_restart: None,
@@ -380,7 +401,7 @@ mod source {
             if let Err(e) = session.SetIsCursorCaptureEnabled(true) {
                 tracing::debug!("window capture: cursor capture not enabled: {e}");
             }
-            if self.border_api && self.borderless() {
+            if self.borderless {
                 let r = session.SetIsBorderRequired(false);
                 if let Err(e) = r {
                     tracing::info!("window capture: capture border not removable: {e}");
@@ -422,24 +443,6 @@ mod source {
             Ok(s)
         }
 
-        /// Asks once for borderless capture; on refusal the yellow border stays.
-        fn borderless(&mut self) -> bool {
-            *self.borderless.get_or_insert_with(|| {
-                let r = GraphicsCaptureAccess::RequestAccessAsync(GraphicsCaptureAccessKind::Borderless)
-                    .and_then(|op| op.join());
-                match r {
-                    Ok(AppCapabilityAccessStatus::Allowed) => true,
-                    Ok(s) => {
-                        tracing::info!("window capture: borderless capture not allowed ({s:?}), border stays");
-                        false
-                    }
-                    Err(e) => {
-                        tracing::info!("window capture: borderless capture not available ({e}), border stays");
-                        false
-                    }
-                }
-            })
-        }
 
         /// Drains the pool to its newest frame: the frame, its texture and the
         /// client crop inside it. Recreates the pool when the window resized.
@@ -461,6 +464,7 @@ mod source {
                 if let Err(e) = s.pool.Recreate(&self.device, FORMAT, 2, content) {
                     let _ = f.Close();
                     self.drop_session(now);
+                    self.next_search = now + RETRY; // back off like a failed start
                     return Err(anyhow::Error::from(e).context("Recreate frame pool, restarting the session"));
                 }
                 s.size = content;

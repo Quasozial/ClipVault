@@ -165,7 +165,7 @@ impl CaptureController {
     /// New target from the game watcher.
     pub async fn set_target(&mut self, t: CaptureTarget, s: &Settings, games: &[Game]) {
         self.target = t.clone();
-        self.game_exes = game_window_for(&t, games, GameCapture::Window);
+        self.game_exes = game_window_for(&t, games);
         self.stop_rl();
         if t == CaptureTarget::None {
             self.stop().await;
@@ -268,7 +268,7 @@ impl CaptureController {
             out_w = out_w.div_ceil(4) * 4; // the HDR shader writes 4 pixels per store
         }
         let encoder = self.pick_encoder(s.encoder);
-        let game_window = self.game_exes.clone().filter(|_| s.game_capture == GameCapture::Window);
+        let game_window = spec_game_window(self.game_exes.as_ref(), s.game_capture);
         let spec = CaptureSpec {
             output_idx,
             fps: s.fps,
@@ -299,14 +299,21 @@ impl CaptureController {
         );
         let (dw, dh, dhz, hdr) = (display.width, display.height, display.refresh_hz, display.hdr);
         let white = spec.hdr_sdr_white;
-        tracing::info!(
-            "capture start: {:?} on output {output_idx} ({dw}x{dh}@{dhz} hdr={hdr} sdr_white={white:?}), {out_w}x{out_h}@{} {:?}, window={:?}, tracks {:?}",
-            self.target,
-            s.fps,
-            encoder,
-            spec.game_window,
-            pipes.iter().map(|p| p.title).collect::<Vec<_>>()
-        );
+        let tracks = pipes.iter().map(|p| p.title).collect::<Vec<_>>();
+        match &spec.game_window {
+            Some(exes) => tracing::info!(
+                "capture start: {:?} as its window {exes:?} (window capture; monitor output {output_idx} {dw}x{dh}@{dhz} hdr={hdr} sdr_white={white:?}), {out_w}x{out_h}@{} {:?}, tracks {tracks:?}",
+                self.target,
+                s.fps,
+                encoder,
+            ),
+            None => tracing::info!(
+                "capture start: {:?} on output {output_idx} ({dw}x{dh}@{dhz} hdr={hdr} sdr_white={white:?}), {out_w}x{out_h}@{} {:?}, tracks {tracks:?}",
+                self.target,
+                s.fps,
+                encoder,
+            ),
+        }
         self.output_idx = Some(output_idx);
         // d. Go.
         self.supervisor.start(spec).await;
@@ -350,14 +357,21 @@ fn audio_setup_needed(current: Option<&[(SourceKind, &'static str)]>, plan: &[(S
     current != Some(plan)
 }
 
-/// Exe names to record as a window: the target game's, when games are recorded
-/// as windows.
-fn game_window_for(target: &CaptureTarget, games: &[Game], mode: GameCapture) -> Option<Vec<String>> {
+/// Exe names of the target game (None for Desktop/None, or a game whose exe
+/// names are unknown: logged, that game then records its monitor).
+fn game_window_for(target: &CaptureTarget, games: &[Game]) -> Option<Vec<String>> {
     let CaptureTarget::Game { name, .. } = target else { return None };
-    if mode != GameCapture::Window {
-        return None;
+    let exes = games.iter().find(|g| &g.name == name).map(game_exes).filter(|e| !e.is_empty());
+    if exes.is_none() {
+        tracing::warn!("no exe names known for game {name:?}: its window cannot be found, recording its monitor");
     }
-    games.iter().find(|g| &g.name == name).map(game_exes)
+    exes
+}
+
+/// The window to record for this capture: the game's exes when the setting
+/// records games as windows. The one place `Settings::game_capture` applies.
+fn spec_game_window(exes: Option<&Vec<String>>, mode: GameCapture) -> Option<Vec<String>> {
+    exes.filter(|_| mode == GameCapture::Window).cloned()
 }
 
 /// SDR white in scRGB units (1.0 = 80 nits). An SDR desktop duplicated as FP16
@@ -384,12 +398,14 @@ mod tests {
     fn window_exes_only_for_games_with_window_setting() {
         let games = [Game { id: 1, name: "Rocket League".into(), exe_names: vec!["RocketLeague_EAC.exe".into()], path: None, enabled: true }];
         let rl = CaptureTarget::Game { name: "Rocket League".into(), pid: 7 };
-        assert_eq!(
-            game_window_for(&rl, &games, GameCapture::Window),
-            Some(vec!["rocketleague_eac.exe".into(), "rocketleague.exe".into()])
-        );
-        assert_eq!(game_window_for(&rl, &games, GameCapture::Monitor), None);
-        assert_eq!(game_window_for(&CaptureTarget::Desktop, &games, GameCapture::Window), None);
+        let exes = game_window_for(&rl, &games);
+        assert_eq!(exes, Some(vec!["rocketleague_eac.exe".into(), "rocketleague.exe".into()]));
+        assert_eq!(spec_game_window(exes.as_ref(), GameCapture::Window), exes);
+        assert_eq!(spec_game_window(exes.as_ref(), GameCapture::Monitor), None, "Monitor setting records the monitor");
+        assert_eq!(game_window_for(&CaptureTarget::Desktop, &games), None);
+        assert_eq!(spec_game_window(None, GameCapture::Window), None);
+        let unknown = CaptureTarget::Game { name: "Unknown".into(), pid: 8 };
+        assert_eq!(game_window_for(&unknown, &games), None);
     }
 
     #[test]

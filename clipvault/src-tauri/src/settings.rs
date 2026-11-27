@@ -93,7 +93,7 @@ impl Encoder {
     }
 }
 
-/// How a game is recorded (see `capture::window_capture`).
+/// How a game is recorded (see `capture::window_grab`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum GameCapture {
     /// The game window itself, whatever monitor it is on.
