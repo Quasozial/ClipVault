@@ -6,3 +6,4 @@ pub mod supervisor;
 pub mod kick;
 pub mod job;
 pub mod hdr_grab;
+pub mod window_grab;
