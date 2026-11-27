@@ -13,11 +13,11 @@ use crate::capture::display::{list_displays, resolve_display, window_monitor};
 use crate::capture::supervisor::{Health, Supervisor};
 use crate::db::games::Game;
 use crate::events::EventBus;
-use crate::game_watcher::CaptureTarget;
+use crate::game_watcher::{game_exes, CaptureTarget};
 use crate::notify::{Ui, APP_TITLE};
 use crate::rl_stats;
 use crate::save::{CaptureInfo, SaveService};
-use crate::settings::{Encoder, Settings};
+use crate::settings::{Encoder, GameCapture, Settings};
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -74,6 +74,9 @@ pub struct CaptureController {
     audio: Option<AudioLayout>,
     rl: Option<CancellationToken>,
     target: CaptureTarget,
+    /// Exe names of the target game (None for Desktop/None); recorded as a
+    /// window when `Settings::game_capture` says so.
+    game_exes: Option<Vec<String>>,
     /// ddagrab output in use by the running capture.
     output_idx: Option<u32>,
     /// Set after FFmpeg could not open the selected output; cleared by a
@@ -112,6 +115,7 @@ impl CaptureController {
             audio: None,
             rl: None,
             target: CaptureTarget::None,
+            game_exes: None,
             output_idx: None,
             force_primary: false,
             encoders,
@@ -161,6 +165,7 @@ impl CaptureController {
     /// New target from the game watcher.
     pub async fn set_target(&mut self, t: CaptureTarget, s: &Settings, games: &[Game]) {
         self.target = t.clone();
+        self.game_exes = game_window_for(&t, games, GameCapture::Window);
         self.stop_rl();
         if t == CaptureTarget::None {
             self.stop().await;
@@ -263,6 +268,7 @@ impl CaptureController {
             out_w = out_w.div_ceil(4) * 4; // the HDR shader writes 4 pixels per store
         }
         let encoder = self.pick_encoder(s.encoder);
+        let game_window = self.game_exes.clone().filter(|_| s.game_capture == GameCapture::Window);
         let spec = CaptureSpec {
             output_idx,
             fps: s.fps,
@@ -277,6 +283,7 @@ impl CaptureController {
             segment_prefix: String::new(),
             video_source: self.video_source,
             wallclock_origin_us: 0,
+            game_window,
         };
         // Keyed by stream layout: a later save of this footage (after the game
         // ended, or after a restart with another layout) still gets its info.
@@ -293,10 +300,11 @@ impl CaptureController {
         let (dw, dh, dhz, hdr) = (display.width, display.height, display.refresh_hz, display.hdr);
         let white = spec.hdr_sdr_white;
         tracing::info!(
-            "capture start: {:?} on output {output_idx} ({dw}x{dh}@{dhz} hdr={hdr} sdr_white={white:?}), {out_w}x{out_h}@{} {:?}, tracks {:?}",
+            "capture start: {:?} on output {output_idx} ({dw}x{dh}@{dhz} hdr={hdr} sdr_white={white:?}), {out_w}x{out_h}@{} {:?}, window={:?}, tracks {:?}",
             self.target,
             s.fps,
             encoder,
+            spec.game_window,
             pipes.iter().map(|p| p.title).collect::<Vec<_>>()
         );
         self.output_idx = Some(output_idx);
@@ -342,6 +350,16 @@ fn audio_setup_needed(current: Option<&[(SourceKind, &'static str)]>, plan: &[(S
     current != Some(plan)
 }
 
+/// Exe names to record as a window: the target game's, when games are recorded
+/// as windows.
+fn game_window_for(target: &CaptureTarget, games: &[Game], mode: GameCapture) -> Option<Vec<String>> {
+    let CaptureTarget::Game { name, .. } = target else { return None };
+    if mode != GameCapture::Window {
+        return None;
+    }
+    games.iter().find(|g| &g.name == name).map(game_exes)
+}
+
 /// SDR white in scRGB units (1.0 = 80 nits). An SDR desktop duplicated as FP16
 /// arrives as linear sRGB with white at exactly 1.0. On an HDR desktop it is
 /// Windows' "SDR content brightness" (`level` in thousandths; unknown: the
@@ -361,6 +379,18 @@ fn primary_output() -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn window_exes_only_for_games_with_window_setting() {
+        let games = [Game { id: 1, name: "Rocket League".into(), exe_names: vec!["RocketLeague_EAC.exe".into()], path: None, enabled: true }];
+        let rl = CaptureTarget::Game { name: "Rocket League".into(), pid: 7 };
+        assert_eq!(
+            game_window_for(&rl, &games, GameCapture::Window),
+            Some(vec!["rocketleague_eac.exe".into(), "rocketleague.exe".into()])
+        );
+        assert_eq!(game_window_for(&rl, &games, GameCapture::Monitor), None);
+        assert_eq!(game_window_for(&CaptureTarget::Desktop, &games, GameCapture::Window), None);
+    }
 
     #[test]
     fn sdr_white_per_desktop_kind() {

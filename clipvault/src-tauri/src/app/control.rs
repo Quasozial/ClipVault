@@ -159,6 +159,10 @@ pub(super) async fn health_loop(core: Arc<AppCore>, mut rx: broadcast::Receiver<
                     }
                 }
                 Ok(SupervisorEvent::SegmentClosed(_)) => {}
+                Ok(SupervisorEvent::Notice(m)) => {
+                    tracing::info!("capture notice: {m}");
+                    core.ui.toast(APP_TITLE, &m);
+                }
                 Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!("health loop lagged {n} events"),
                 Err(broadcast::error::RecvError::Closed) => return,
             },

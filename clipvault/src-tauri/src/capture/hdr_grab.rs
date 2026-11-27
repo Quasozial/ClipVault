@@ -1057,6 +1057,7 @@ mod tests {
             segment_prefix: "r1_".into(),
             video_source: VideoSource::Ddagrab,
             wallclock_origin_us: 0,
+            game_window: None,
         };
         spec.wallclock_origin_us =
             SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_micros() as i64;

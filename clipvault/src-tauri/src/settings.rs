@@ -93,6 +93,16 @@ impl Encoder {
     }
 }
 
+/// How a game is recorded (see `capture::window_capture`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum GameCapture {
+    /// The game window itself, whatever monitor it is on.
+    #[default]
+    Window,
+    /// The whole monitor the game is on.
+    Monitor,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -105,6 +115,8 @@ pub struct Settings {
     pub output_height: u32,
     pub monitor_id: Option<String>,
     pub desktop_capture: bool,
+    /// How games are recorded: their window, or the monitor they are on.
+    pub game_capture: GameCapture,
     pub buffer_dir: PathBuf,
     pub capture_dir: PathBuf,
     pub mic_device: Option<String>,
@@ -139,6 +151,7 @@ impl Default for Settings {
             output_height: 1080,
             monitor_id: None,
             desktop_capture: false,
+            game_capture: GameCapture::default(),
             buffer_dir: default_buffer_dir(),
             capture_dir: PathBuf::from(r"E:\GameClips"),
             mic_device: None,
@@ -210,6 +223,7 @@ impl Settings {
             || self.mic_device != other.mic_device
             || self.output_device != other.output_device
             || self.discord_split != other.discord_split
+            || self.game_capture != other.game_capture
     }
 
     /// Save length actually used: `save_length_s` clamped to `max_save_length_s`.
@@ -321,6 +335,17 @@ mod tests {
         assert!(!changed(&|s| s.save_length_s = 30));
         assert!(!changed(&|s| s.desktop_capture = true));
         assert!(!changed(&|s| s.start_with_windows = true));
+    }
+
+    #[test]
+    fn game_capture_defaults_to_window_and_restarts_capture() {
+        assert_eq!(Settings::default().game_capture, GameCapture::Window);
+        let old: Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(old.game_capture, GameCapture::Window, "settings files without the field");
+        let base = Settings::default();
+        let mut s = base.clone();
+        s.game_capture = GameCapture::Monitor;
+        assert!(base.capture_differs(&s));
     }
 
     #[test]

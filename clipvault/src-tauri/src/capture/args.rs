@@ -51,6 +51,9 @@ pub struct CaptureSpec {
     /// output timestamps are `capture wall time - T0`. Pick it just before
     /// spawning FFmpeg; the supervisor sets it per run.
     pub wallclock_origin_us: i64,
+    /// Lower-case exe names of the game whose window the native grabber records
+    /// instead of the monitor (`None`: monitor). Not part of the stream layout.
+    pub game_window: Option<Vec<String>>,
 }
 
 /// Video source graph for ddagrab on an SDR desktop. Verified on hardware in
@@ -372,6 +375,7 @@ mod tests {
             segment_prefix: "r3_".into(),
             video_source: VideoSource::Ddagrab,
             wallclock_origin_us: T0_US,
+            game_window: None,
         }
     }
 

@@ -47,6 +47,7 @@ mod audio_smoke {
             segment_prefix: prefix.into(),
             video_source: VideoSource::TestSrc,
             wallclock_origin_us: 0, // set per run by the caller / supervisor
+            game_window: None,
         }
     }
 

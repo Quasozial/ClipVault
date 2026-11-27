@@ -93,6 +93,8 @@ pub enum Health {
 pub enum SupervisorEvent {
     HealthChanged(Health),
     SegmentClosed(Segment),
+    /// Message from the window grabber for the user (e.g. fallback to the monitor).
+    Notice(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -590,7 +592,11 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         // opens it. It never needs a desktop kick.
         let mut grabber: Option<HdrGrabber> = None;
         if let Some(cfg) = hdr_grab_config(&spec) {
-            let failed = match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg, Arc::new(|_| {}))).await {
+            let events = inner.events.clone();
+            let notice: crate::capture::hdr_grab::Notice = Arc::new(move |m| {
+                let _ = events.send(SupervisorEvent::Notice(m));
+            });
+            let failed = match tokio::task::spawn_blocking(move || HdrGrabber::start(cfg, notice)).await {
                 Ok(Ok(g)) => {
                     grabber = Some(g);
                     None
@@ -714,7 +720,7 @@ fn hdr_grab_config(spec: &CaptureSpec) -> Option<HdrGrabConfig> {
         out_h: spec.out_h,
         sdr_white: white,
         pipe_name: hdr_pipe_name(spec),
-        window_exes: None,
+        window_exes: spec.game_window.clone(),
     })
 }
 
@@ -988,6 +994,17 @@ mod tests {
         assert_eq!(panic_restart_delay(&mut h, t0 + s(70)), PANIC_RESTART_DELAY);
     }
 
+    #[test]
+    fn window_spec_maps_to_window_grabber() {
+        let mut s = test_spec(Path::new("x"));
+        s.video_source = VideoSource::Ddagrab;
+        s.hdr_sdr_white = Some(1.0);
+        s.game_window = Some(vec!["rocketleague.exe".into()]);
+        assert_eq!(hdr_grab_config(&s).unwrap().window_exes, Some(vec!["rocketleague.exe".to_string()]));
+        s.game_window = None;
+        assert_eq!(hdr_grab_config(&s).unwrap().window_exes, None);
+    }
+
     fn test_spec(dir: &Path) -> CaptureSpec {
         use crate::capture::args::AudioInput;
         CaptureSpec {
@@ -1004,6 +1021,7 @@ mod tests {
             segment_prefix: String::new(),
             video_source: VideoSource::TestSrc,
             wallclock_origin_us: 0,
+            game_window: None,
         }
     }
 

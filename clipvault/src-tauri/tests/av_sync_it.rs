@@ -97,6 +97,7 @@ mod av_sync {
             segment_prefix: "s_".into(),
             video_source,
             wallclock_origin_us: t0_us,
+            game_window: None,
         };
 
         // Synthetic real-time source: 10 ms chunks paced by wall clock; one chunk
