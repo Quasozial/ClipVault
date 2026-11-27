@@ -310,6 +310,8 @@ mod imp {
     use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
     const SHADER: &str = include_str!("hdr_nv12.hlsl");
+    /// A duplication that delivered no frame for this long is recreated.
+    const DUP_FIRST_FRAME_TIMEOUT: Duration = Duration::from_secs(2);
 
     /// Constant buffer, laid out like `Params` in the shader (16-byte rows).
     #[repr(C)]
@@ -343,6 +345,12 @@ mod imp {
         /// The duplicated monitor; `None` for the window source.
         output: Option<IDXGIOutput5>,
         dup: Option<IDXGIOutputDuplication>,
+        /// When `dup` was created and whether it has delivered anything since.
+        /// A new duplication hands out the current desktop at once; one that
+        /// stays silent is wedged (seen after access lost next to a fullscreen
+        /// game) and is recreated after [`DUP_FIRST_FRAME_TIMEOUT`].
+        dup_since: Instant,
+        dup_delivered: bool,
         /// 1x1 texture bound as the source of black pictures before any frame.
         blank: ID3D11ShaderResourceView,
         cs: ID3D11ComputeShader,
@@ -510,14 +518,19 @@ mod imp {
                 }
             }
 
-            // 3. Convert for the next tick.
-            if gpu.frame.is_some() {
-                let (_, _, fw, fh) = gpu.frame.as_ref().unwrap();
-                let view = View::full(*fw, *fh, cfg.out_w, cfg.out_h);
-                gpu.dispatch(&cfg, next_staging, &view);
-                pending = Some(next_staging);
-                next_staging ^= 1;
-            }
+            // 3. Convert for the next tick. Black until the first desktop
+            // frame: FFmpeg must get video (and cut segments) even while the
+            // duplication delivers nothing, or the watchdog restarts it forever.
+            let view = match gpu.frame.as_ref() {
+                Some((_, _, fw, fh)) => View::full(*fw, *fh, cfg.out_w, cfg.out_h),
+                None => {
+                    black += 1;
+                    black_view
+                }
+            };
+            gpu.dispatch(&cfg, next_staging, &view);
+            pending = Some(next_staging);
+            next_staging ^= 1;
 
             log_stats(pipe, &mut frames, &mut new_frames, &mut black, &mut stats_at);
         }
@@ -677,6 +690,8 @@ mod imp {
                     ctx,
                     output,
                     dup: None,
+                    dup_since: Instant::now(),
+                    dup_delivered: false,
                     blank: blank.context("blank view")?,
                     cs,
                     cbuf: cbuf.context("constant buffer")?,
@@ -703,6 +718,8 @@ mod imp {
             let dup = unsafe { output.DuplicateOutput1(&self.device, 0, &[DXGI_FORMAT_R16G16B16A16_FLOAT]) }
                 .context("DuplicateOutput1 (FP16)")?;
             self.dup = Some(dup);
+            self.dup_since = Instant::now();
+            self.dup_delivered = false;
             Ok(())
         }
 
@@ -713,8 +730,13 @@ mod imp {
             let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
             let mut res: Option<IDXGIResource> = None;
             match unsafe { dup.AcquireNextFrame(0, &mut info, &mut res) } {
-                Ok(()) => {}
-                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => return Ok(false),
+                Ok(()) => self.dup_delivered = true,
+                Err(e) if e.code() == DXGI_ERROR_WAIT_TIMEOUT => {
+                    if !self.dup_delivered && self.dup_since.elapsed() >= DUP_FIRST_FRAME_TIMEOUT {
+                        bail!("duplication delivered no frame in {} s", DUP_FIRST_FRAME_TIMEOUT.as_secs());
+                    }
+                    return Ok(false);
+                }
                 Err(e) => return Err(anyhow!(e).context("AcquireNextFrame")),
             }
             let result = self.take_frame(&dup, &info, res);
