@@ -217,6 +217,111 @@ pub fn window_monitor(_pid: u32) -> Option<String> {
     None
 }
 
+/// A visible, unowned top-level window together with its owning process' exe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WindowCandidate {
+    pub hwnd: isize,
+    /// Lowercase file name only, e.g. `rocketleague.exe`.
+    pub exe: String,
+    pub area: i64,
+    pub minimized: bool,
+}
+
+/// Among candidates whose `exe` is in `exes`, prefer non-minimized, then the
+/// largest `area`; ties go to the first.
+pub fn pick_game_window<'a>(cands: &'a [WindowCandidate], exes: &[String]) -> Option<&'a WindowCandidate> {
+    let mut best: Option<&WindowCandidate> = None;
+    for c in cands.iter().filter(|c| exes.iter().any(|e| *e == c.exe)) {
+        let better = best.is_none_or(|b| match (c.minimized, b.minimized) {
+            (false, true) => true,
+            (true, false) => false,
+            _ => c.area > b.area,
+        });
+        if better {
+            best = Some(c);
+        }
+    }
+    best
+}
+
+/// Main window of the running game: the best visible (or minimized) top-level
+/// window owned by a process whose exe name is in `exes`. Returns the handle and
+/// whether it is minimized.
+#[cfg(windows)]
+pub fn game_window(exes: &[String]) -> Option<(windows::Win32::Foundation::HWND, bool)> {
+    use std::collections::HashMap;
+    use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, RECT};
+    use windows::Win32::System::Threading::{
+        OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindow, GetWindowPlacement, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+        IsWindowVisible, GW_OWNER, WINDOWPLACEMENT,
+    };
+    use windows::core::{BOOL, PWSTR};
+
+    struct Search {
+        pids: HashMap<u32, Option<String>>,
+        exes: Vec<String>,
+        cands: Vec<WindowCandidate>,
+    }
+
+    fn exe_of(pid: u32) -> Option<String> {
+        let h = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let r = unsafe { QueryFullProcessImageNameW(h, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) };
+        let _ = unsafe { CloseHandle(h) };
+        r.ok()?;
+        let path = String::from_utf16_lossy(&buf[..len as usize]);
+        path.rsplit(['\\', '/']).next().map(str::to_ascii_lowercase).filter(|n| !n.is_empty())
+    }
+
+    unsafe extern "system" fn visit(hwnd: HWND, lp: LPARAM) -> BOOL {
+        // SAFETY: lp is the &mut Search passed to EnumWindows below, alive for the call.
+        let s = unsafe { &mut *(lp.0 as *mut Search) };
+        if !unsafe { IsWindowVisible(hwnd) }.as_bool()
+            || unsafe { GetWindow(hwnd, GW_OWNER) }.is_ok_and(|o| !o.is_invalid())
+        {
+            return true.into();
+        }
+        let mut pid = 0u32;
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+        let exe = match s.pids.entry(pid).or_insert_with(|| exe_of(pid)) {
+            Some(e) if s.exes.iter().any(|x| x == e) => e.clone(),
+            _ => return true.into(),
+        };
+        let minimized = unsafe { IsIconic(hwnd) }.as_bool();
+        let mut r = RECT::default();
+        let ok = if minimized {
+            let mut wp = WINDOWPLACEMENT { length: std::mem::size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+            let ok = unsafe { GetWindowPlacement(hwnd, &mut wp) }.is_ok();
+            r = wp.rcNormalPosition;
+            ok
+        } else {
+            unsafe { GetWindowRect(hwnd, &mut r) }.is_ok()
+        };
+        if !ok {
+            return true.into();
+        }
+        let area = i64::from((r.right - r.left).max(0)) * i64::from((r.bottom - r.top).max(0));
+        if area > 0 {
+            s.cands.push(WindowCandidate { hwnd: hwnd.0 as isize, exe, area, minimized });
+        }
+        true.into()
+    }
+
+    let mut s = Search { pids: HashMap::new(), exes: exes.to_vec(), cands: Vec::new() };
+    let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut s as *mut Search as isize)) };
+    let c = pick_game_window(&s.cands, exes)?;
+    Some((HWND(c.hwnd as *mut core::ffi::c_void), c.minimized))
+}
+
+#[cfg(not(windows))]
+pub fn game_window(_exes: &[String]) -> Option<(isize, bool)> {
+    None
+}
+
 /// Pick the monitor whose `id` equals `wanted`; otherwise the primary (else the
 /// first) monitor. `fell_back` is true when `wanted` was given but not found.
 /// With no displays at all, returns a placeholder for ddagrab output 0.
@@ -299,5 +404,36 @@ mod tests {
         idx.sort();
         idx.dedup();
         assert_eq!(idx.len(), ds.len(), "output_idx must be unique: {ds:?}");
+    }
+
+    fn c(h: isize, exe: &str, area: i64, min: bool) -> WindowCandidate {
+        WindowCandidate { hwnd: h, exe: exe.into(), area, minimized: min }
+    }
+
+    #[test]
+    fn picks_largest_and_switches() {
+        let exes = vec!["rocketleague.exe".to_string(), "rocketleague_eac.exe".to_string()];
+        let splash = c(1, "rocketleague.exe", 600 * 400, false);
+        assert_eq!(pick_game_window(&[splash.clone(), c(9, "explorer.exe", 9_999_999, false)], &exes).unwrap().hwnd, 1);
+        let main = c(2, "rocketleague.exe", 3840 * 2160, false);
+        assert_eq!(pick_game_window(&[splash, main], &exes).unwrap().hwnd, 2);
+    }
+
+    #[test]
+    fn prefers_visible_over_minimized() {
+        let exes = vec!["a.exe".to_string()];
+        assert_eq!(pick_game_window(&[c(1, "a.exe", 100, true), c(2, "a.exe", 10, false)], &exes).unwrap().hwnd, 2);
+        assert_eq!(pick_game_window(&[c(1, "a.exe", 100, true)], &exes).unwrap().hwnd, 1);
+    }
+
+    #[test]
+    fn no_matching_window() {
+        assert!(pick_game_window(&[c(1, "b.exe", 5, false)], &["a.exe".into()]).is_none());
+    }
+
+    #[test]
+    fn ties_pick_first() {
+        let exes = vec!["a.exe".to_string()];
+        assert_eq!(pick_game_window(&[c(1, "a.exe", 10, false), c(2, "a.exe", 10, false)], &exes).unwrap().hwnd, 1);
     }
 }

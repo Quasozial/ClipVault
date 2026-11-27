@@ -81,7 +81,7 @@ fn file_name_lower(s: &str) -> String {
     s.rsplit(|c: char| c == char::from(92u8) || c == '/').next().unwrap_or(s).trim().to_lowercase()
 }
 
-fn game_exes(g: &Game) -> Vec<String> {
+pub fn game_exes(g: &Game) -> Vec<String> {
     let mut v: Vec<String> = g
         .exe_names
         .iter()
