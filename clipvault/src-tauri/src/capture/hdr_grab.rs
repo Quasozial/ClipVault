@@ -37,6 +37,7 @@
 //! FFmpeg is not connected are dropped, the queue is bounded (oldest dropped),
 //! a respawned FFmpeg reconnects to a fresh listening instance.
 use crate::audio::pipes::{Instance, POLL};
+use crate::capture::window_grab::Rect;
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -63,6 +64,30 @@ pub struct HdrGrabConfig {
     /// SDR white in scRGB units (e.g. 3.0 for 240 nits).
     pub sdr_white: f32,
     pub pipe_name: String,
+}
+
+/// What the shader draws: the `src` rectangle of the captured frame (source
+/// pixels) scaled into the `dst` rectangle of the output picture, black
+/// around it; `black` draws an all-black picture (Y 16, UV 128).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) struct View {
+    pub src: Rect,
+    pub dst: Rect,
+    pub black: bool,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+impl View {
+    /// The whole `src_w` x `src_h` frame stretched over the whole
+    /// `out_w` x `out_h` output (the monitor path).
+    pub fn full(src_w: u32, src_h: u32, out_w: u32, out_h: u32) -> View {
+        View {
+            src: Rect { x: 0, y: 0, w: src_w, h: src_h },
+            dst: Rect { x: 0, y: 0, w: out_w, h: out_h },
+            black: false,
+        }
+    }
 }
 
 /// NV12 frame size in bytes.
@@ -279,14 +304,20 @@ mod imp {
     /// Constant buffer, laid out like `Params` in the shader (16-byte rows).
     #[repr(C)]
     #[derive(Clone, Copy, Default, PartialEq)]
-    struct Params {
+    pub(super) struct Params {
         out_size: [u32; 2],
+        /// Source pixels per output pixel inside the destination rectangle.
         scale: [f32; 2],
         src_inv: [f32; 2],
         inv_white: f32,
         cursor_mode: u32,
         cursor_pos: [i32; 2],
         cursor_size: [u32; 2],
+        src_origin: [f32; 2],
+        dst_origin: [u32; 2],
+        dst_size: [u32; 2],
+        black: u32,
+        _pad: u32,
     }
 
     struct Cursor {
@@ -390,7 +421,9 @@ mod imp {
 
             // 3. Convert for the next tick.
             if gpu.frame.is_some() {
-                gpu.dispatch(&cfg, next_staging);
+                let (_, _, fw, fh) = gpu.frame.as_ref().unwrap();
+                let view = View::full(*fw, *fh, cfg.out_w, cfg.out_h);
+                gpu.dispatch(&cfg, next_staging, &view);
                 pending = Some(next_staging);
                 next_staging ^= 1;
             }
@@ -655,17 +688,25 @@ mod imp {
             Ok(())
         }
 
-        fn dispatch(&mut self, cfg: &HdrGrabConfig, staging: usize) {
+        /// Converts the current frame into staging buffer `staging`, drawing
+        /// `view.src` (frame pixels) into `view.dst` (output pixels).
+        fn dispatch(&mut self, cfg: &HdrGrabConfig, staging: usize, view: &View) {
             let Some((_, srv, sw, sh)) = self.frame.clone() else { return };
             let cursor = self.cursor.as_ref().filter(|_| self.cursor_visible);
+            let (src, dst) = (view.src, view.dst);
             let p = Params {
                 out_size: [cfg.out_w, cfg.out_h],
-                scale: [sw as f32 / cfg.out_w as f32, sh as f32 / cfg.out_h as f32],
+                scale: [src.w as f32 / dst.w.max(1) as f32, src.h as f32 / dst.h.max(1) as f32],
                 src_inv: [1.0 / sw as f32, 1.0 / sh as f32],
                 inv_white: 1.0 / cfg.sdr_white.max(1.0),
                 cursor_mode: cursor.map_or(0, |c| c.mode),
                 cursor_pos: self.cursor_pos,
                 cursor_size: cursor.map_or([0, 0], |c| [c.w, c.h]),
+                src_origin: [src.x as f32, src.y as f32],
+                dst_origin: [dst.x, dst.y],
+                dst_size: [dst.w, dst.h],
+                black: view.black as u32,
+                _pad: 0,
             };
             unsafe {
                 if p != self.params {
@@ -807,6 +848,20 @@ fn cursor_rgba(kind: u32, w: u32, h: u32, pitch: u32, buf: &[u8]) -> Option<(Vec
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn params_match_cbuffer_layout() {
+        assert_eq!(std::mem::size_of::<imp::Params>(), 80);
+    }
+
+    #[test]
+    fn full_view_is_identity() {
+        let v = View::full(3840, 2160, 1920, 1080);
+        assert_eq!(v.src, Rect { x: 0, y: 0, w: 3840, h: 2160 });
+        assert_eq!(v.dst, Rect { x: 0, y: 0, w: 1920, h: 1080 });
+        assert!(!v.black);
+    }
 
     #[test]
     fn ticks_land_just_before_epoch_frame_boundaries() {

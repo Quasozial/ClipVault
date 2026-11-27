@@ -4,16 +4,26 @@
 // Each thread writes a 4x2 block of output pixels: two 4-byte rows of luma and
 // one 4-byte row of interleaved chroma (U0 V0 U1 V1), so every store is a
 // whole, aligned uint. Requires out width % 4 == 0 and out height % 2 == 0.
+//
+// The source rectangle (src_origin, scale * dst_size) of the frame is scaled
+// into the destination rectangle (dst_origin, dst_size) of the output; output
+// pixels outside it, and every pixel when `black` is set, are black (Y 16,
+// UV 128). The monitor path uses the whole frame and the whole output.
 
 cbuffer Params : register(b0)
 {
     uint2 out_size;      // recording width, height
-    float2 scale;        // desktop pixels per output pixel (x, y)
-    float2 src_inv;      // 1 / desktop width, 1 / desktop height
+    float2 scale;        // source pixels per output pixel (x, y) inside dst
+    float2 src_inv;      // 1 / frame width, 1 / frame height
     float inv_white;     // 1 / SDR white in scRGB units (e.g. 1/3 for 240 nits)
     uint cursor_mode;    // 0 none, 1 straight alpha, 2 mask (a=1 opaque, a=0.5 invert)
-    int2 cursor_pos;     // cursor top-left in desktop pixels
+    int2 cursor_pos;     // cursor top-left in frame pixels
     uint2 cursor_size;
+    float2 src_origin;   // source rectangle top-left in frame pixels
+    uint2 dst_origin;    // destination rectangle top-left in output pixels
+    uint2 dst_size;      // destination rectangle width, height
+    uint black;          // non-zero: the whole picture is black
+    uint _pad;
 };
 
 Texture2D<float4> src : register(t0);
@@ -61,9 +71,12 @@ float3 tap(float2 p)
 
 // sRGB-encoded colour of output pixel o: four taps a quarter output pixel
 // apart (an exact 2x2 box for a 2:1 downscale, a fair box filter up to ~4:1).
+// Black outside the destination rectangle or when `black` is set.
 float3 pixel(uint2 o)
 {
-    float2 center = (float2(o) + 0.5) * scale;
+    if (black != 0 || any(o < dst_origin) || any(o >= dst_origin + dst_size))
+        return float3(0, 0, 0);
+    float2 center = src_origin + (float2(o - dst_origin) + 0.5) * scale;
     float2 d = scale * 0.25;
     float3 c = tap(center + float2(-d.x, -d.y)) + tap(center + float2(d.x, -d.y))
              + tap(center + float2(-d.x, d.y)) + tap(center + float2(d.x, d.y));
