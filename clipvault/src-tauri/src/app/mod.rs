@@ -250,6 +250,29 @@ impl AppCore {
         if let Some(since) = locks::lock(&self.rescan_after_restore).take() {
             self.spawn_rescan(since);
         }
+        if crate::moments_meta::backfill_pending(&self.db) {
+            self.spawn_moments_meta_backfill();
+        }
+    }
+
+    /// Once per library: gives clips found on disk the Moments name, markers,
+    /// tags and trim embedded in their files (see `moments_meta`).
+    fn spawn_moments_meta_backfill(&self) {
+        let Some(ffmpeg) = self.cfg.ffmpeg.clone() else { return };
+        let (db, ui) = (self.db.clone(), self.ui.clone());
+        self.spawn(async move {
+            let live = ui.clone();
+            let done = tokio::task::spawn_blocking(move || {
+                crate::moments_meta::backfill(&db, &ffmpeg, &|c| live.clip_updated(c))
+            })
+            .await;
+            match done {
+                Ok(Ok(0)) => {}
+                Ok(Ok(n)) => ui.toast(APP_TITLE, &format!("Restored SteelSeries Moments names and markers for {n} clip(s).")),
+                Ok(Err(e)) => tracing::error!("[moments-meta] backfill failed: {e:#}"),
+                Err(e) => tracing::error!("[moments-meta] task failed: {e}"),
+            }
+        });
     }
 
     /// Adds clips in the capture folder the library lacks: those saved after

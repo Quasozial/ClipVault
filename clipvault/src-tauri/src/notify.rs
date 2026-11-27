@@ -40,6 +40,8 @@ pub trait Ui: Send + Sync {
     /// (`Rocket League`, `Desktop`, or `None` when idle).
     fn health_changed(&self, health: &Health, target: Option<&str>);
     fn clip_saved(&self, clip: &Clip);
+    /// A library clip changed outside the UI (metadata found in its file).
+    fn clip_updated(&self, _clip: &Clip) {}
     /// Mic level in dBFS, at most 10 Hz, only while the Settings page is open.
     fn mic_level(&self, dbfs: f32);
     /// Desktop capture was toggled (tray checkbox).

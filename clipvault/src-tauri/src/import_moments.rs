@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 pub const DEFAULT_GG_DB: &str = r"C:\ProgramData\SteelSeries\GG\apps\moments\db\database.db";
 
 const SAVED_KEY: &str = "moments.timelineEvents.savedClip";
-const TRIM_EPS: f64 = 0.05;
+pub(crate) const TRIM_EPS: f64 = 0.05;
 
 #[derive(Debug, Clone, Default)]
 pub struct ImportOptions {
@@ -138,7 +138,7 @@ struct SrcClip {
     tags: String,
 }
 
-fn parse_tags(json: &str) -> Vec<String> {
+pub(crate) fn parse_tags(json: &str) -> Vec<String> {
     let Ok(Value::Array(items)) = serde_json::from_str::<Value>(json) else { return Vec::new() };
     let mut out: Vec<String> = Vec::new();
     for it in items {
@@ -157,7 +157,7 @@ fn parse_tags(json: &str) -> Vec<String> {
 }
 
 /// `offset` is subtracted from every timestamp (clip played from a pre-trimmed file).
-fn parse_markers(json: &str, full_length: f64, offset: f64, limit: f64) -> Vec<Marker> {
+pub(crate) fn parse_markers(json: &str, full_length: f64, offset: f64, limit: f64) -> Vec<Marker> {
     let Ok(Value::Array(items)) = serde_json::from_str::<Value>(json) else { return Vec::new() };
     let mut out = Vec::new();
     for it in items {

@@ -14,6 +14,7 @@ pub mod import_moments;
 pub mod library;
 pub mod locks;
 pub mod logging;
+pub mod moments_meta;
 pub mod notify;
 pub mod overlay;
 pub mod relocate;

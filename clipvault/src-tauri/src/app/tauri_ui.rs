@@ -72,6 +72,10 @@ impl Ui for TauriUi {
         let _ = self.app.emit("clip-saved", clip);
     }
 
+    fn clip_updated(&self, clip: &Clip) {
+        let _ = self.app.emit("clip-updated", clip);
+    }
+
     fn mic_level(&self, dbfs: f32) {
         #[derive(Serialize, Clone)]
         struct MicLevel {

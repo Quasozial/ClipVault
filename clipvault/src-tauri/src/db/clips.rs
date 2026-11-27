@@ -281,6 +281,17 @@ pub fn update_meta(
     Ok(())
 }
 
+/// Adds `markers` to the clip (existing ones stay).
+pub fn add_markers(conn: &Connection, id: &str, markers: &[Marker]) -> Result<()> {
+    for m in markers {
+        conn.execute(
+            "INSERT INTO markers (clip_id, t_seconds, type, label) VALUES (?1, ?2, ?3, ?4)",
+            params![id, m.t_s, m.kind.as_str(), m.label],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn set_trim(
     conn: &Connection,
     id: &str,

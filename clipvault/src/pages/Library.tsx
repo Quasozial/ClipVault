@@ -141,13 +141,29 @@ export function Library() {
   // Clips moved to another folder: their paths changed.
   useEffect(() => on("clips-moved", () => void load()), [load]);
 
-  // Background compression changed a clip's size.
+  // Background compression changed a clip's size, or Moments metadata found
+  // in its file filled in name, tags, markers and trim.
   useEffect(
     () =>
       on("clip-updated", (clip) => {
         setAll((list) =>
           list
-            ? list.map((x) => (x.id === clip.id ? { ...x, size: clip.size, compressed: clip.compressed, original_size: clip.original_size } : x))
+            ? list.map((x) =>
+                x.id === clip.id
+                  ? {
+                      ...x,
+                      title: clip.title,
+                      description: clip.description,
+                      tags: clip.tags,
+                      markers: clip.markers,
+                      trim_in: clip.trim_in,
+                      trim_out: clip.trim_out,
+                      size: clip.size,
+                      compressed: clip.compressed,
+                      original_size: clip.original_size,
+                    }
+                  : x,
+              )
             : list,
         );
       }),

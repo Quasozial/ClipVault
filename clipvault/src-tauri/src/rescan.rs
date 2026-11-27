@@ -12,13 +12,16 @@
 //!   older ones were known when the backup was written, either in it or
 //!   removed from the library on purpose. `None` (no usable backup, an empty
 //!   library) takes every matching file.
-//! * Added clips have no markers and no thumbnail (made on demand by the grid).
+//! * Added clips have no thumbnail (made on demand by the grid). A Moments
+//!   clip gets the name, game, markers, tags and trim embedded in its file
+//!   (see `moments_meta`); others have no markers.
 //! * `may_compress == false` marks them compressed so background compression
 //!   never rewrites them: without a backup to tell, a file could be a Moments
 //!   clip, which ClipVault must not write.
 use crate::compress::parse_media_info;
 use crate::db::clips::{self, Clip, ClipFilter};
 use crate::locks;
+use crate::moments_meta;
 use anyhow::Result;
 use chrono::{Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone};
 use rusqlite::Connection;
@@ -106,14 +109,20 @@ pub fn rescan(
             continue;
         };
         let (width, height, fps, av1) = parse_video_stream(&stderr);
-        let recorded = Local.from_local_datetime(&local).earliest().unwrap_or_else(Local::now);
-        let clip = Clip {
+        let recorded = Local.from_local_datetime(&local).earliest().unwrap_or_else(Local::now).fixed_offset();
+        // A Moments clip carries its name, markers and trim in the file.
+        let embedded = moments_meta::read(ffmpeg, &path, info.duration_s).unwrap_or_else(|e| {
+            tracing::warn!("[rescan] {e:#}");
+            None
+        });
+        let game = embedded.as_ref().and_then(|m| m.game.clone()).unwrap_or(game);
+        let mut clip = Clip {
             id: uuid::Uuid::new_v4().to_string(),
-            title: format!("{game} {}", recorded.format("%d.%m.%Y %H:%M")),
+            title: moments_meta::auto_title(&game, &recorded),
             description: String::new(),
             path: path.clone(),
             game,
-            recorded_at: recorded.fixed_offset(),
+            recorded_at: recorded,
             duration_s: info.duration_s,
             fps,
             width,
@@ -130,6 +139,9 @@ pub fn rescan(
             compressed: false,
             original_size: None,
         };
+        if let Some(m) = &embedded {
+            moments_meta::apply(&mut clip, m);
+        }
         let conn = locks::lock(db);
         // A save may have added this file while it was being probed.
         if clips::id_by_path(&conn, &path)?.is_some() {
