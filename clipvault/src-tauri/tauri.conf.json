@@ -25,14 +25,20 @@
       "devCsp": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' asset: http://asset.localhost data: blob:; media-src 'self' asset: http://asset.localhost blob:; font-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'; connect-src ipc: http://ipc.localhost ws://localhost:1420 ws://localhost:1421",
       "assetProtocol": {
         "enable": true,
-        "scope": ["$LOCALAPPDATA/ClipVault/thumbs/*"]
+        "scope": [
+          "$LOCALAPPDATA/ClipVault/thumbs/*"
+        ]
       }
     }
   },
   "bundle": {
     "active": true,
-    "targets": ["nsis"],
-    "externalBin": ["binaries/ffmpeg"],
+    "targets": [
+      "nsis"
+    ],
+    "externalBin": [
+      "binaries/ffmpeg"
+    ],
     "shortDescription": "Game clip recorder",
     "icon": [
       "icons/32x32.png",
@@ -40,6 +46,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFNzE3MkU1NDJDMDIzOTUKUldTVkk4QkM1WEp4L3NpQjJHZVhRc28xb1k0RURqNUE2a3NjRXpBc25ndy8wcDViZTZtVUtHNzcK",
+      "endpoints": [
+        "https://github.com/Quasozial/ClipVault/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
   }
 }

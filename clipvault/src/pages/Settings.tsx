@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  isMock,
   on,
   type AudioDevice,
   type DisplayInfo,
@@ -37,6 +38,8 @@ import { settingsOpenSync } from "../lib/settingsOpen";
 import { rebaseSettings } from "../lib/settingsMerge";
 import { moveRunning, startImport, useImport } from "../lib/stores";
 import { reportError, toast } from "../lib/toast";
+import { checkForUpdates, openUpdateDialog, useUpdater } from "../lib/updater";
+import { getVersion } from "@tauri-apps/api/app";
 
 const SECTIONS = [
   ["storage", "Clips & storage"],
@@ -72,6 +75,39 @@ function Section(props: { id: string; title: string; intro?: ReactNode; children
       {props.intro && <p className="s-intro">{props.intro}</p>}
       <div className="s-rows">{props.children}</div>
     </section>
+  );
+}
+
+/** Installed version, and a manual "Check for updates" (or the update found). */
+function UpdateRow() {
+  const { status, upToDateAt } = useUpdater();
+  const [version, setVersion] = useState<string | null>(null);
+  useEffect(() => {
+    if (!isMock) getVersion().then(setVersion, () => setVersion(null));
+  }, []);
+  const found = "update" in status ? status.update : null;
+  const hint = found
+    ? `Version ${found.version} is available.`
+    : upToDateAt
+      ? `Up to date (checked ${upToDateAt.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}).`
+      : "Checks for new versions automatically.";
+  return (
+    <Row label={`Version ${version ?? "–"}`} hint={hint}>
+      {found ? (
+        <button type="button" className="btn btn-primary" onClick={openUpdateDialog}>
+          Update to {found.version}
+        </button>
+      ) : (
+        <button
+          type="button"
+          className="btn"
+          disabled={isMock || status.phase === "checking"}
+          onClick={() => void checkForUpdates(true)}
+        >
+          {status.phase === "checking" ? "Checking…" : "Check for updates"}
+        </button>
+      )}
+    </Row>
   );
 }
 
@@ -866,6 +902,7 @@ export function Settings({ section }: { section?: string }) {
           <Row label="Start with Windows" hint="Starts in the tray when you sign in.">
             <Toggle checked={draft.start_with_windows} onChange={(v) => set("start_with_windows", v)} label={draft.start_with_windows ? "On" : "Off"} />
           </Row>
+          <UpdateRow />
         </Section>
 
         <ImportSection onImported={fetchSettings} />

@@ -127,6 +127,16 @@ async fn set_settings_open(core: State<'_, Arc<AppCore>>, open: bool) -> Result<
 /// FFmpeg path for commands that need it (Moments import thumbnails).
 pub struct FfmpegPath(pub Option<std::path::PathBuf>);
 
+/// Stops capture and lets running saves finish before the updater runs the
+/// installer: on Windows it exits the process right after launching it, with
+/// no `RunEvent::Exit`, and a running FFmpeg would lock the files it replaces.
+#[tauri::command]
+async fn prepare_update(core: State<'_, Arc<AppCore>>) -> Result<(), String> {
+    tracing::info!("stopping capture for update install");
+    core.inner().clone().shutdown().await;
+    Ok(())
+}
+
 /// Whether GG's Moments database exists on this machine (first-run prompt).
 #[tauri::command]
 fn moments_db_available() -> bool {
@@ -244,6 +254,8 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
@@ -304,6 +316,7 @@ pub fn run() {
             get_health,
             get_hotkey_errors,
             set_settings_open,
+            prepare_update,
             moments_db_available,
             import_moments,
             commands::list_clips,

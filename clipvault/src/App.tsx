@@ -1,5 +1,8 @@
 import { isMock } from "./api";
+import { useEffect } from "react";
 import { HealthStatus, Toasts } from "./components/ui";
+import { UpdateDialog } from "./components/UpdateDialog";
+import { startUpdateChecks } from "./lib/updater";
 import { ClipView } from "./pages/ClipView";
 import { Library } from "./pages/Library";
 import { Settings } from "./pages/Settings";
@@ -21,6 +24,7 @@ export default function App() {
   const route = useRoute();
   const health = useHealth();
   const section = route.page === "clip" ? "library" : route.page;
+  useEffect(startUpdateChecks, []);
 
   return (
     <div className="app">
@@ -46,6 +50,7 @@ export default function App() {
         {route.page === "settings" && <Settings section={route.section} />}
       </main>
       <Toasts />
+      <UpdateDialog />
     </div>
   );
 }
