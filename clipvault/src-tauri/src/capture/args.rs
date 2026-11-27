@@ -241,12 +241,9 @@ pub fn build_capture_args(spec: &CaptureSpec) -> Vec<String> {
     for n in 0..spec.audio_inputs.len() {
         push(&["-map", &format!("{}:a", n + 1)]);
     }
-    // The video input ends on its own when ddagrab loses the desktop
-    // (DXGI_ERROR_ACCESS_LOST, 887a0026: a game switching display mode or a
-    // window popping up over exclusive fullscreen). The audio pipes never end:
-    // stop the run with the video, so the supervisor restarts it within a
-    // watchdog tick instead of after the stall timeout.
-    push(&["-shortest"]);
+    // No -shortest: with wall-clock pipe inputs it stalls FFmpeg's sync queue
+    // before the first packet, so no segment is ever written. When ddagrab
+    // ends its stream (DXGI_ERROR_ACCESS_LOST) the stall watchdog restarts the run.
 
     if spec.video_source == VideoSource::TestSrc {
         push(&["-pix_fmt", "yuv420p"]);
@@ -461,14 +458,12 @@ mod tests {
         assert!(a.contains(r"-segment_list C:\buf\r3_list.csv -segment_list_type csv -segment_list_flags live C:\buf\r3_seg_%08d.ts"), "{a}");
     }
 
-    /// ddagrab ends its stream on DXGI_ERROR_ACCESS_LOST (887a0026: a game
-    /// switching display mode, a window over exclusive fullscreen). The audio
-    /// pipes never end, so without `-shortest` FFmpeg lingers without video
-    /// until the 5 s stall timeout; with it FFmpeg exits and is restarted at once.
+    /// `-shortest` with the wall-clock audio pipes stalls FFmpeg before its
+    /// first segment (every run hit "no new segment"); it must stay out.
     #[test]
-    fn video_end_ends_the_run() {
+    fn no_shortest() {
         let a = joined(&build_capture_args(&spec()));
-        assert!(a.contains(" -shortest "), "{a}");
+        assert!(!a.contains("-shortest"), "{a}");
     }
 
     const COLOR_TAGS: &str = "-colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv";
