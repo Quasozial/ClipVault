@@ -123,6 +123,7 @@ pub(super) async fn control_loop(
         if let Some(t) = watch(&core, &mut watcher, procs.as_ref(), &games) {
             tracing::info!("capture target: {t:?}");
             *locks::write(&core.target) = t.clone();
+            locks::lock(&core.notices).new_capture();
             let idle = t == CaptureTarget::None;
             if !idle {
                 core.refresh_mic_probe(); // capture's own mic source supplies levels now
@@ -160,8 +161,12 @@ pub(super) async fn health_loop(core: Arc<AppCore>, mut rx: broadcast::Receiver<
                 }
                 Ok(SupervisorEvent::SegmentClosed(_)) => {}
                 Ok(SupervisorEvent::Notice(m)) => {
-                    tracing::info!("capture notice: {m}");
-                    core.ui.toast(APP_TITLE, &m);
+                    if locks::lock(&core.notices).admit(&m) {
+                        tracing::info!("capture notice: {m}");
+                        core.ui.toast(APP_TITLE, &m);
+                    } else {
+                        tracing::debug!("capture notice (already shown this capture): {m}");
+                    }
                 }
                 Err(broadcast::error::RecvError::Lagged(n)) => tracing::warn!("health loop lagged {n} events"),
                 Err(broadcast::error::RecvError::Closed) => return,

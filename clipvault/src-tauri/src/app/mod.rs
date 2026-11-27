@@ -120,6 +120,9 @@ pub struct AppCore {
     ui: Arc<dyn Ui>,
     target: RwLock<CaptureTarget>,
     health: RwLock<Health>,
+    /// Grabber notices already toasted in the current capture; reset by the
+    /// control loop whenever the capture target is set.
+    notices: Mutex<health::NoticeDedup>,
     settings_open: AtomicBool,
     /// Mic-only audio source feeding `mic-level` while Settings is open and
     /// nothing is being captured (see [`AppCore::refresh_mic_probe`]).
@@ -219,6 +222,7 @@ impl AppCore {
             ui,
             target: RwLock::new(CaptureTarget::None),
             health: RwLock::new(Health::Idle),
+            notices: Mutex::new(health::NoticeDedup::default()),
             settings_open: AtomicBool::new(false),
             mic_probe: Mutex::new(None),
             rl_connected: Arc::new(AtomicBool::new(false)),

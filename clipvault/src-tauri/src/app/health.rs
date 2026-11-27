@@ -1,6 +1,7 @@
 //! Pure health presentation logic: which health changes deserve a toast, and
 //! which tray state a health maps to.
 use crate::capture::supervisor::Health;
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// Recording must hold this long after `Failing` before "recovered" is announced.
@@ -71,6 +72,26 @@ impl HealthToaster {
     }
 }
 
+/// Grabber notices are sent by every FFmpeg run (each run starts a new
+/// grabber): each distinct text is toasted at most once per capture.
+/// [`NoticeDedup::new_capture`] is called whenever the capture target is set.
+#[derive(Debug, Default)]
+pub struct NoticeDedup {
+    shown: HashSet<String>,
+}
+
+impl NoticeDedup {
+    /// A new capture starts: every notice may be shown again.
+    pub fn new_capture(&mut self) {
+        self.shown.clear();
+    }
+
+    /// Whether `notice` should be toasted (first time in this capture).
+    pub fn admit(&mut self, notice: &str) -> bool {
+        self.shown.insert(notice.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayState {
     Idle,
@@ -99,6 +120,16 @@ pub fn is_missing_output(h: &Health) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notices_toast_once_per_capture() {
+        let mut d = NoticeDedup::default();
+        assert!(d.admit("Can't capture Game"));
+        assert!(!d.admit("Can't capture Game"), "next FFmpeg run, same capture: silent");
+        assert!(d.admit("other notice"), "a different notice still shows");
+        d.new_capture();
+        assert!(d.admit("Can't capture Game"), "new capture: shown again");
+    }
 
     fn failing(r: &str) -> Health {
         Health::Failing { reason: r.into() }

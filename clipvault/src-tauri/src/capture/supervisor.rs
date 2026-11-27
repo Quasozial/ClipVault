@@ -605,14 +605,17 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
                 Err(e) => Some(e.to_string()),
             };
             if let Some(e) = failed {
-                if spec.ddagrab_fallback {
-                    // SDR desktop: ddagrab gives the same picture. Stay on it
-                    // for this capture rather than failing again every run.
-                    tracing::warn!("native capture could not start ({e}); recording with ddagrab");
-                    spec.hdr_sdr_white = None;
-                } else {
-                    tracing::error!("HDR capture could not start: {e}");
-                    spawn_error = Some(format!("HDR capture: {e}"));
+                match grab_failure(&spec, &e) {
+                    GrabFailure::Ddagrab => {
+                        // SDR desktop: ddagrab gives the same picture. Stay on
+                        // it for this capture rather than failing again every run.
+                        tracing::warn!("native capture could not start ({e}); recording with ddagrab");
+                        spec.hdr_sdr_white = None;
+                    }
+                    GrabFailure::Fail(reason) => {
+                        tracing::error!("native capture could not start: {reason}");
+                        spawn_error = Some(reason);
+                    }
                 }
             }
         }
@@ -707,6 +710,27 @@ async fn supervise(inner: Arc<Inner>, mut spec: CaptureSpec, stop: CancellationT
         clean_ended_run(&spec.segment_dir, &spec.segment_prefix, &indexed);
         rotate_run_logs(&mut ended_logs, log_path);
         inner.set_health(next_health);
+    }
+}
+
+/// What a run does when the native grabber could not start.
+#[derive(Debug, PartialEq)]
+enum GrabFailure {
+    /// Record the whole monitor with ddagrab for the rest of this capture.
+    Ddagrab,
+    /// Fail the run (health `Failing`) with this reason.
+    Fail(String),
+}
+
+/// Only an SDR *desktop* capture may fall back to ddagrab. A game recorded as
+/// its window never does: ddagrab would silently record the whole monitor.
+fn grab_failure(spec: &CaptureSpec, e: &str) -> GrabFailure {
+    if spec.game_window.is_some() {
+        GrabFailure::Fail(format!("game window capture: {e}"))
+    } else if spec.ddagrab_fallback {
+        GrabFailure::Ddagrab
+    } else {
+        GrabFailure::Fail(format!("HDR capture: {e}"))
     }
 }
 
@@ -1003,6 +1027,19 @@ mod tests {
         assert_eq!(hdr_grab_config(&s).unwrap().window_exes, Some(vec!["rocketleague.exe".to_string()]));
         s.game_window = None;
         assert_eq!(hdr_grab_config(&s).unwrap().window_exes, None);
+    }
+
+    #[test]
+    fn game_window_capture_never_falls_back_to_ddagrab() {
+        let mut s = test_spec(Path::new("."));
+        s.ddagrab_fallback = true; // SDR desktop
+        assert_eq!(grab_failure(&s, "x"), GrabFailure::Ddagrab, "desktop target keeps the fallback");
+        s.game_window = Some(vec!["rocketleague.exe".into()]);
+        assert_eq!(grab_failure(&s, "x"), GrabFailure::Fail("game window capture: x".into()));
+        s.ddagrab_fallback = false; // HDR desktop
+        assert_eq!(grab_failure(&s, "x"), GrabFailure::Fail("game window capture: x".into()));
+        s.game_window = None;
+        assert_eq!(grab_failure(&s, "x"), GrabFailure::Fail("HDR capture: x".into()));
     }
 
     fn test_spec(dir: &Path) -> CaptureSpec {
