@@ -5,6 +5,8 @@
  *
  * Checked a little after start and then every few hours; a failed automatic
  * check (offline, GitHub down) stays quiet, a failed manual one is shown.
+ * Either way a failure is diagnosed per endpoint (status, host) into the log,
+ * since the plugin's own error does not say what answered.
  */
 import { invoke } from "@tauri-apps/api/core";
 import { relaunch } from "@tauri-apps/plugin-process";
@@ -70,9 +72,20 @@ export async function checkForUpdates(manual = false): Promise<void> {
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     console.warn("update check failed", e);
+    // The plugin's error hides the HTTP status; ask each endpoint again (also logged).
+    const probes = await invoke<EndpointProbe[]>("diagnose_update", { error: message }).catch(() => []);
     set({ status: { phase: "idle" } });
-    if (manual) toast.error(`Could not check for updates: ${message}`);
+    if (manual) {
+      const why = probes.map((p) => `${p.host}: ${p.result}`).join(" · ");
+      toast.error(`Could not check for updates: ${message}${why ? ` (${why})` : ""}`);
+    }
   }
+}
+
+interface EndpointProbe {
+  host: string;
+  ok: boolean;
+  result: string;
 }
 
 /** Downloads and verifies the update, stops capture, then runs the installer and restarts. */

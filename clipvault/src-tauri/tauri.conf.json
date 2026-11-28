@@ -53,7 +53,9 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEZFNzE3MkU1NDJDMDIzOTUKUldTVkk4QkM1WEp4L3NpQjJHZVhRc28xb1k0RURqNUE2a3NjRXpBc25ndy8wcDViZTZtVUtHNzcK",
       "endpoints": [
-        "https://github.com/Quasozial/ClipVault/releases/latest/download/latest.json"
+        "https://github.com/Quasozial/ClipVault/releases/latest/download/latest.json",
+        "https://raw.githubusercontent.com/Quasozial/ClipVault/main/clipvault/updater/latest.json",
+        "https://cdn.jsdelivr.net/gh/Quasozial/ClipVault@main/clipvault/updater/latest.json"
       ],
       "windows": {
         "installMode": "passive"

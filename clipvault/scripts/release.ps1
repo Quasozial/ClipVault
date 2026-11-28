@@ -11,7 +11,11 @@
   The updater reads
   https://github.com/Quasozial/ClipVault/releases/latest/download/latest.json,
   so the repository must be public and the release must not be a draft or
-  prerelease. Each installer is signed with the updater key
+  prerelease. When that fails (some antivirus, firewalls or rate limits answer
+  the app but not the browser), it falls back to the copy committed at
+  updater/latest.json on main, read through raw.githubusercontent.com and
+  jsDelivr: this script commits and pushes that copy after publishing, so
+  releases must be made from main. Each installer is signed with the updater key
   (default: ~/.tauri/clipvault.key); the app only installs updates whose
   signature matches the public key in tauri.conf.json. Lose the private key
   and installed copies can never update again: back it up.
@@ -48,6 +52,7 @@ if ($null -eq $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD) { $env:TAURI_SIGNING_PRIV
 
 if (-not $DryRun) {
   if (git status --porcelain) { throw "Working tree has uncommitted changes; commit them first." }
+  if ((git rev-parse --abbrev-ref HEAD) -ne "main") { throw "Release from main: the fallback manifest is read from main." }
   git fetch --tags --quiet origin
   if (git tag --list $tag) { throw "Tag $tag already exists: bump the version in src-tauri/tauri.conf.json." }
   $null = gh auth status 2>&1
@@ -99,4 +104,18 @@ $notesPath = Join-Path $nsis "release-notes.md"
 [IO.File]::WriteAllText($notesPath, $notesText, (New-Object Text.UTF8Encoding $false))
 gh release create $tag $setup $sigFile $latest --repo $Repo --title "ClipVault $version" --notes-file $notesPath --verify-tag
 if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+
+# ----- fallback manifest (after the release exists, so its URL works) -----
+Copy-Item $latest "updater/latest.json" -Force
+git add "updater/latest.json"
+git commit -m "chore(release): $version update manifest"
+if ($LASTEXITCODE -ne 0) { throw "Committing updater/latest.json failed" }
+git push origin HEAD:main
+if ($LASTEXITCODE -ne 0) { throw "Pushing updater/latest.json failed (the GitHub release is published; push main by hand)" }
+# jsDelivr caches branch files for up to 12 h; ask it to refetch now.
+try {
+  $null = Invoke-WebRequest -UseBasicParsing "https://purge.jsdelivr.net/gh/$Repo@main/clipvault/updater/latest.json"
+} catch {
+  Write-Warning "jsDelivr purge failed ($_); its copy refreshes within 12 h."
+}
 Write-Host "Published $tag. Installed copies will offer the update on their next check."

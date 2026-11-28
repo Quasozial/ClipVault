@@ -24,6 +24,7 @@ pub mod save;
 pub mod settings;
 pub mod thumbs;
 pub mod tray;
+pub mod update_diag;
 pub mod waveform;
 
 use app::tauri_ui::{HealthPayload, TauriUi};
@@ -135,6 +136,14 @@ async fn prepare_update(core: State<'_, Arc<AppCore>>) -> Result<(), String> {
     tracing::info!("stopping capture for update install");
     core.inner().clone().shutdown().await;
     Ok(())
+}
+
+/// After a failed update check: logs `error` and what each update endpoint
+/// answers (status, host, block page title), and returns that for the toast.
+#[tauri::command]
+async fn diagnose_update(app: AppHandle, error: String) -> Vec<update_diag::EndpointProbe> {
+    tracing::warn!("update check failed: {error}");
+    update_diag::diagnose(&app).await
 }
 
 /// Whether GG's Moments database exists on this machine (first-run prompt).
@@ -317,6 +326,7 @@ pub fn run() {
             get_hotkey_errors,
             set_settings_open,
             prepare_update,
+            diagnose_update,
             moments_db_available,
             import_moments,
             commands::list_clips,
